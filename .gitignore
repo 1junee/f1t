@@ -28,6 +28,7 @@ dist/
 # Images & binary data
 *.jpg
 *.png
+!frontend/public/f1t-icon.png
 
 # Generated & data directories
 pipeline/database_images/
