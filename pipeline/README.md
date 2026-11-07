@@ -11,7 +11,7 @@
 | 파일 | 역할 |
 |---|---|
 | `intent/intent_extraction.py` | 사용자가 언급한 속성을 추출하고, 의류 종류가 명확할 때만 카테고리 도출 |
-| `retrieval/candidate_selection.py` | 속성 기반 Supabase 테이블 라우팅 + SQL 후보 필터링 |
+| `retrieval/candidate_selection.py` | 속성 기반 검색 계획·테이블 라우팅·결과 후처리 (기존 REST 조회 함수도 포함) |
 | `target_description/target_description_generation.py` | Gemini로 검색용 영문 target description 생성 |
 | `retrieval/target_description_retrieval.py` | gemini-embedding-2로 텍스트 → 768차원 벡터 인코딩 |
 | `target_description/recommendation_explanation.py` | 매칭된 속성 기반 한국어 추천 이유 생성 |
@@ -32,7 +32,7 @@
     ↓
 [1단계 + 2단계 — 병렬]
   ├→ 메타데이터 추출 — Gemini VLM (명시된 속성만)
-  └→ Target Description 생성 — Gemini gemini-3.5-flash
+  └→ Target Description 생성 — Gemini gemini-3.5-flash-lite
     ↓
 [3단계] 테이블·조건·후보 수를 정하는 검색 계획 생성 (DB 조회 전)
     ↓
@@ -41,7 +41,7 @@
   ├→ 목표 설명문 Gemini Embedding 인코딩
   └→ (fabric 속성 있을 시) fabric 임베딩 인코딩
     ↓
-[5단계] SQL 후보 조회 + 로컬 재정렬 / RPC 벡터 검색 → 속성 후처리
+[5단계] DB 정확 필터·코사인 정렬 / HNSW 검색 → 속성 후처리
     ↓
 [6단계] 한국어 추천 이유 생성
     ↓
@@ -63,18 +63,21 @@ API 응답 반환
 - 요청에 fabric 속성이 없으면 이미지 유사도만 사용
 - 요청에 fabric 속성이 있는데 상품의 소재 벡터가 없으면 소재 점수는 0으로 계산
 
-가중치는 `recommendation_service.py`의 `_rank_stored_gemini_vectors(fabric_weight=0.2)` 및 Supabase RPC 함수 `match_fashion_items_768`에서 적용합니다.
+운영 검색의 가중치는 Supabase RPC 함수 `match_fashion_items_filtered_768`과 `match_fashion_items_768`에서 적용합니다. `recommendation_service.py`의 `_rank_stored_gemini_vectors(fabric_weight=0.2)`는 기존 REST 검색을 비교하는 벤치마크용으로 남아 있으며 운영의 정확 필터 경로에서는 호출하지 않습니다.
 
 ### 실제 검색 경로
 
 `recommendation_service.py`는 모든 요청을 같은 방식으로 검색하지 않습니다.
 
-1. 소매·기장·계절·핏처럼 정확한 속성이 있으면 `retrieve_candidates()`가 해당 카테고리 테이블을 REST로 조회합니다.
-2. 후보가 있으면 DB에 저장된 `gemini_image_embedding_768`과 `gemini_fabric_text_embedding_768`을 사용해 Python에서 최종 순위를 계산합니다.
-3. 정확한 후보가 없거나 REST 조회가 실패하면 `match_fashion_items_768` RPC로 전환합니다.
-4. 테이블 조건이 없는 RPC 검색은 Supabase 연결 수를 제한하기 위해 세 상품 테이블을 순차 검색한 뒤 결과를 합칩니다.
+1. 소매·기장·계절·핏처럼 정확한 속성이 있으면 `search_filtered()`가 `match_fashion_items_filtered_768` RPC를 한 번 호출합니다. 영어 속성값은 기존 매핑으로 DB 저장값에 맞춥니다.
+2. DB는 테이블·세부 카테고리·속성 조건을 적용하고, 일치하는 전체 후보의 정확 코사인 점수를 계산해 상위 상품만 반환합니다. ID순 첫 1,000개 제한이나 후보 벡터 다운로드는 없습니다. 소재 조건이 있으면 동일한 80:20 가중 점수로 정렬합니다.
+3. 색상과 소재는 정확 필터가 아니라 검색 설명문과 벡터 점수로 반영합니다. 성별 `unisex`는 남성·여성 모두 포함, 나머지 배열 속성은 하나 이상 일치 조건을 유지합니다.
+4. 정확 조건이 없거나 일치 후보가 0개일 때 기존 `match_fashion_items_768` HNSW RPC를 사용합니다. 새 RPC 설치 누락이나 조회 장애는 검색 오류로 반환하며, 조용히 조건을 완화하지 않습니다.
+5. 기존 HNSW 경로에서 테이블 조건이 없으면 세 상품 테이블을 순차 검색한 뒤 결과를 합칩니다. 새 정확 필터 RPC는 지정 범위가 없을 때 적용 가능한 테이블의 일치 후보를 함께 비교합니다.
 
-메타데이터 필터 이후의 후보 수와 HNSW의 후보 수는 서로 다른 값입니다. 아래의 50~100개는 **RPC가 이미지 벡터로 고른 뒤 재정렬하는 후보 수**입니다.
+`pipeline.retrieval_diagnostics.matched_count`는 DB가 필터링한 전체 후보 수이며 반환 상품 수와 다릅니다. 아래의 HNSW 50~100개는 **기존 RPC가 이미지 벡터로 고른 뒤 재정렬하는 후보 수**로, 새 정확 필터 RPC에 적용되는 제한이 아닙니다.
+
+응답의 `retrieval_diagnostics`는 DB 필터·정렬·전체 시간과 HTTP 헤더 대기·본문 수신·JSON 파싱 시간, 응답 바이트를 구분합니다. 헤더 대기에는 연결·게이트웨이·DB 처리가 모두 들어가며, DB 시간은 HTTP 시간의 일부입니다. `transport_overhead_estimate_ms`는 HTTP 전체에서 DB 내부 시간을 뺀 추정치이므로 순수 네트워크 시간으로 해석하지 않습니다. 후보가 0개라 완화 검색을 수행했다면 해당 시간은 `fallback` 항목에 별도로 기록합니다.
 
 ---
 
@@ -178,7 +181,7 @@ CREATE INDEX ON musinsa_skirt_dress USING hnsw (gemini_image_embedding_768 vecto
 
 검색은 상위층의 한 점에서 시작합니다. 현재 점보다 질문 벡터에 가까운 이웃이 있으면 그쪽으로 이동하고, 더 가까운 이웃을 찾기 어려워지면 아래층으로 내려갑니다. 이 과정을 가장 촘촘한 하위층까지 반복해 가까운 후보를 찾습니다. 모든 상품을 확인하지 않기 때문에 빠르지만, 가장 가까운 상품을 100% 보장하는 정확 검색이 아니라 **근사 최근접 검색**입니다.
 
-이 프로젝트는 속도와 재정렬 품질을 맞추기 위해 다음 두 값을 구분합니다.
+기존 HNSW 검색 경로는 다음 값을 구분합니다. 정확 메타데이터 검색은 HNSW 후보 상한을 사용하지 않고 필터를 통과한 전체 후보를 비교합니다.
 
 ```sql
 result_count := least(greatest(coalesce(p_match_count, 10), 1), 100);
@@ -194,16 +197,18 @@ perform set_config('hnsw.ef_search', '100', true);
 
 즉, “가까운 후보 50~100개”는 HNSW의 보편적인 고정값이 아니라 **`match_fashion_items_768` 함수에 명시한 프로젝트 정책**입니다. 요청 결과 수의 5배를 후보로 가져오되 최소 50개, 최대 100개로 제한합니다. 그 후보에 소재 조건이 있으면 이미지 80%와 소재 20%로 다시 점수를 매기고, 최종 `result_count`개만 반환합니다.
 
-소재 HNSW를 따로 두지 않는 이유는 소재 벡터가 전체 상품을 처음부터 검색하는 기준이 아니라, 이미지 HNSW가 고른 작은 후보 집합을 재정렬하는 기준이기 때문입니다.
+HNSW 경로에서 소재 벡터는 이미지 HNSW가 고른 후보 집합을 재정렬하는 데 사용합니다. 정확 필터 경로에서는 전체 일치 후보의 이미지·소재 점수를 함께 계산합니다. 두 경로 모두 별도의 소재 HNSW 인덱스를 사용하지 않습니다.
 
 > `candidate_count`와 `ef_search`는 다른 값입니다. 전자는 SQL이 재정렬할 행 수이고, 후자는 HNSW 내부 탐색 폭입니다. `candidate_count`만 크게 잡고 `ef_search`가 작으면 실제 후보가 기대보다 적을 수 있으므로, RPC는 요청 안에서 `ef_search=100`을 함께 설정합니다.
 
-- 라이브 함수와 동일한 SQL: [`sql/match_fashion_items_768.sql`](sql/match_fashion_items_768.sql)
+- HNSW 검색 SQL: [`sql/match_fashion_items_768.sql`](sql/match_fashion_items_768.sql)
+- 정확 필터 검색 SQL: [`sql/match_fashion_items_filtered_768.sql`](sql/match_fashion_items_filtered_768.sql)
 - 공식 설명: [Supabase HNSW indexes](https://supabase.com/docs/guides/ai/vector-indexes/hnsw-indexes)
 
-**2. RPC 함수** `match_fashion_items_768`:  
-백엔드 전용 PostgreSQL 함수입니다. 이미지 HNSW로 후보를 고른 뒤 소재가
-지정된 검색에는 `0.8 × 이미지 + 0.2 × fabric` 점수를 적용합니다.
+**2. 백엔드 전용 RPC 함수 두 개**:
+
+- `match_fashion_items_768`: 기존 이미지 HNSW 후보 검색과 선택적 소재 점수 재정렬을 담당합니다.
+- `match_fashion_items_filtered_768`: 정확 속성 필터 후 전체 일치 후보의 점수를 계산하고, 상위 상품과 DB 계측값을 반환합니다. 기존 팀 함수를 대체하지 않고 별도 함수로 추가합니다. 백엔드 코드 배포 전에 이 함수도 DB에 적용해야 합니다.
 
 함수 실행 권한은 `service_role`에만 있으며 브라우저의 `anon` 키로는 호출할 수 없습니다. 서비스 키는 프론트엔드 환경변수에 넣지 않고 백엔드에서만 사용합니다.
 

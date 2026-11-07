@@ -350,7 +350,12 @@ def _generate_gemini_recommendation_reason(
         "generationConfig": {
             "temperature": 0.4,
             "maxOutputTokens": 2048,
-            "thinkingConfig": {"thinkingBudget": 0},
+            # Flash-Lite 3.5는 thinkingBudget=0을 거부하므로 지원하는 최소 추론 수준을 사용한다.
+            "thinkingConfig": (
+                {"thinkingLevel": "minimal"}
+                if model_name.removeprefix("models/") == "gemini-3.5-flash-lite"
+                else {"thinkingBudget": 0}
+            ),
         },
     }
     request_data = json.dumps(request_body).encode("utf-8")

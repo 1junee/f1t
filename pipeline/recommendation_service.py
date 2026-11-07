@@ -8,6 +8,7 @@ import re
 import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
+from time import perf_counter
 from typing import Any
 
 import numpy as np
@@ -18,7 +19,6 @@ from .intent.intent_extraction import extract_conservative_metadata
 from .retrieval.candidate_selection import (
     build_attribute_text_search_plan,
     refine_attribute_text_results,
-    retrieve_candidates,
 )
 from .retrieval.target_description_retrieval import RetrieveModule
 from .target_description.recommendation_explanation import (
@@ -277,46 +277,40 @@ class FashionRecommendationPipeline:
             match_count = attribute_plan.prefetch_count
             # None은 아직 유효한 검색 경로의 결과를 얻지 못했다는 표식으로 RPC 전환 여부를 결정한다.
             results = None
-            # 정확한 속성 조건이 있으면 후보와 저장 벡터를 받아 Python에서 직접 순위를 계산한다.
+            # 정확한 속성 조건은 DB 안에서 전체 일치 후보를 정렬한다. 벡터를 내려받지 않는다.
             if _has_exact_metadata_filters(attribute_plan.parsed_attributes.to_dict()):
-                try:
-                    strict_candidates = retrieve_candidates(
-                        attribute_plan.parsed_attributes.to_dict(),
-                        include_embeddings=True,
-                        table_filter=active_table_filter,
-                        category2_filter=active_category2_filter,
-                        category2_keyword_filter=active_category2_keyword_filter,
-                    )
-                    if strict_candidates:
-                        results = _rank_stored_gemini_vectors(
-                            embedding=query_embedding,
-                            rows=strict_candidates,
-                            top_k=top_k,
-                            fabric_embedding=fabric_embedding,
-                        )
-                        pipeline_metadata["candidate_selection"] = {
-                            "status": "applied",
-                            "strategy": "intent_rest_prefilter_then_local_gemini_vector_rank",
-                            "strict_candidate_count": len(strict_candidates),
-                            "uses_stored_image_embeddings": True,
-                            "fabric_weighted": fabric_embedding is not None,
-                        }
-                    else:
-                        pipeline_metadata["candidate_selection"] = {
-                            "status": "fallback_no_strict_candidates",
-                            "strategy": "rpc_vector_search",
-                            "strict_candidate_count": 0,
-                        }
-                except Exception:
-                    logger.exception("Intent-based candidate prefilter failed")
+                strict_results, retrieval_diagnostics = self.vector_search.search_filtered(
+                    embedding=query_embedding,
+                    # DB에서 이미 정확 필터와 전체 순위를 계산했으므로 요청한 수만 받는다.
+                    match_count=top_k,
+                    metadata_filters=attribute_plan.parsed_attributes.to_dict(),
+                    table_filter=active_table_filter,
+                    category2_filter=active_category2_filter,
+                    category2_keyword_filter=active_category2_keyword_filter,
+                    fabric_embedding=fabric_embedding,
+                )
+                pipeline_metadata["retrieval_diagnostics"] = retrieval_diagnostics
+                if strict_results:
+                    results = strict_results
+                    pipeline_metadata["prefetch_count"] = top_k
                     pipeline_metadata["candidate_selection"] = {
-                        "status": "fallback_prefilter_error",
-                        "strategy": "rpc_vector_search",
-                        "error_code": "candidate_prefilter_failed",
+                        "status": "applied",
+                        "strategy": "intent_db_filter_then_exact_vector_rank",
+                        "strict_candidate_count": retrieval_diagnostics["matched_count"],
+                        "uses_stored_image_embeddings": True,
+                        "fabric_weighted": fabric_embedding is not None,
                     }
+                else:
+                    pipeline_metadata["candidate_selection"] = {
+                        "status": "fallback_no_strict_candidates",
+                        "strategy": "rpc_vector_search",
+                        "strict_candidate_count": 0,
+                    }
+                # RPC 설치 누락·장애는 예외를 그대로 올린다. 조건을 조용히 무시해 성공 처리하지 않는다.
 
-            # 조건이 없거나 후보 조회가 비었거나 실패했으면 DB의 벡터 검색 RPC를 사용한다.
+            # 정확 조건이 없거나 일치 후보가 0개일 때 기존 완화 검색을 사용한다.
             if results is None:
+                fallback_started = perf_counter()
                 results = self._search_vectors(
                     embedding=query_embedding,
                     match_count=match_count,
@@ -325,6 +319,15 @@ class FashionRecommendationPipeline:
                     category2_keyword_filter=active_category2_keyword_filter,
                     fabric_embedding=fabric_embedding,
                 )
+                if "retrieval_diagnostics" in pipeline_metadata:
+                    # request_count=1은 위 정확 필터 RPC만의 계측이다. 완화 검색은 별도로 표시한다.
+                    pipeline_metadata["retrieval_diagnostics"]["scope"] = "strict_filtered_rpc"
+                    pipeline_metadata["retrieval_diagnostics"]["fallback"] = {
+                        "reason": "no_strict_candidates",
+                        "strategy": "rpc_vector_search",
+                        "duration_ms": round((perf_counter() - fallback_started) * 1000, 2),
+                        "request_count": None,  # 기존 경로는 테이블별 재시도도 가능하므로 추정하지 않는다.
+                    }
 
         # 두 검색 경로의 결과에 동일한 후처리를 적용하고 최종 top_k개를 정한다.
         with timings.stage("postprocess", "결과 정렬·선별"):

@@ -318,7 +318,7 @@ function App() {
   // provider는 요청 해석·설명 생성 모델 선택이며, 검색 임베딩 모델을 바꾸는 메뉴는 아니다.
   const [isProviderMenuOpen, setIsProviderMenuOpen] = useState(false)
   const [providerModels, setProviderModels] = useState<ProviderModels>({
-    gemini: 'gemini-3.5-flash',
+    gemini: 'gemini-3.5-flash-lite',
     openai: 'gpt-5.4-nano',
     qwen: 'qwen3.5-0.8B',
   })

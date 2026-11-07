@@ -61,7 +61,7 @@ EXACT_FILTER_FIELDS = (
 # 문자열 일치 보너스는 현재 비활성화돼 있다. 소재 벡터 점수는 별도 경로에서 계산한다.
 SOFT_TEXT_RERANK_FIELDS = ()
 INTENT_EXTRACTION_STATUS = "gemini_intent_analysis"
-# REST로 가져올 최대 후보 수이며, HNSW 내부 탐색 개수를 뜻하지 않는다.
+# 호환용 /retrieve·기존 방식 벤치마크의 REST 상한이다. 운영 /search는 filtered RPC를 쓴다.
 METADATA_PREFETCH_LIMIT = 1000
 SUPABASE_REST_TIMEOUT_SECONDS = 8
 
@@ -347,8 +347,8 @@ class AttributeTextSearchPlan:
             "notes": [
                 "Metadata extraction uses the conservative prompt from the evaluation experiment, with rule-based parsing only as support metadata.",
                 "category1 is used to narrow the Supabase table before vector search only when explicit or conservatively extracted.",
-                "The API fetches a wider candidate set for metadata mode before post-filter/rerank.",
-                "Exact attributes are post-filtered/reranked only when returned by the RPC.",
+                "Exact metadata filters and cosine ranking run inside the filtered RPC over all matching products.",
+                "The filtered RPC returns only the requested top results; fallback vector search uses a wider candidate set.",
                 "Color stays in the target description; an explicit fabric attribute is embedded separately for weighted similarity.",
                 "Detail terms are handled by the target-description generation path, not as database columns.",
                 "Abstract TPO queries are marked but not hard-filtered unless explicit attributes are present.",
@@ -728,7 +728,7 @@ def retrieve_candidates(
     category2_keyword_filter: str | None = None,
 ) -> list[dict[str, Any]]:
     """
-    VLM 추론 결과(속성 dict)를 받아 Supabase SQL 필터링으로 후보군 반환.
+    호환용 상품 조회/기존 방식 벤치마크에 쓰는 REST 조회. 운영 검색 순위 계산에는 쓰지 않는다.
 
     Args:
         inferred_attributes: {"category1": "top", "sleeve": "long", "color": "blue", ...}
@@ -761,8 +761,16 @@ def retrieve_candidates(
     if target_table not in VALID_TABLES:
         raise ValueError("Invalid table_filter.")
 
-    # 현재는 모든 컬럼을 내려받는다. 임베딩 제외 옵션도 조회 이후에 제거하는 방식이다.
-    select_fields = "*"
+    # 임베딩이 필요 없는 /retrieve는 DB에서부터 벡터를 제외한다.
+    fields = ["id", "name", "brand", "image_url", "category1", "category2", "price",
+              "color", "sex", "season", "stretch", "thickness", "fit", "fabric"]
+    if target_table != "musinsa_pants":
+        fields.append("sleeve")
+    if target_table != "musinsa_top_clothes":
+        fields.append("length")
+    if include_embeddings:
+        fields.extend(["gemini_image_embedding_768", "gemini_fabric_text_embedding_768"])
+    select_fields = ",".join(fields)
     rows: list[dict[str, Any]] = []
     offset = 0
     # 한 번에 모두 전송하지 않고 페이지로 읽되, 기본 1,000개에서 멈춘다.

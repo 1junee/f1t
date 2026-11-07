@@ -148,7 +148,7 @@ def build_target_description_prompt(
 # 어떤 provider를 쓰고 실패 시 무엇으로 전환할지는 recommendation_service.py가 결정한다.
 
 MODEL_NAME = "Qwen/Qwen3-VL-32B-Instruct"
-GEMINI_MODEL_NAME = "gemini-3.5-flash"
+GEMINI_MODEL_NAME = "gemini-3.5-flash-lite"
 TARGET_DESCRIPTION_MODEL_ENV = "GEMINI_TARGET_DESCRIPTION_MODEL"
 LEGACY_GEMINI_MODEL_ENV = "GEMINI_MODEL"
 QWEN_FALLBACK_MODEL_NAME = "Qwen/Qwen3.5-0.8B"

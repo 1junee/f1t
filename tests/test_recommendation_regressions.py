@@ -106,6 +106,17 @@ def test_candidate_query_honors_explicit_table_and_both_category_filters(db_quer
     )
 
 
+@pytest.mark.parametrize("table,absent_column", [
+    ("musinsa_top_clothes", "length"), ("musinsa_pants", "sleeve"),
+])
+def test_product_lookup_does_not_download_vectors_or_missing_columns(db_query, table, absent_column):
+    candidates.retrieve_candidates({}, table_filter=table)
+    selection = next(args[0] for method, args in db_query.calls if method == "select")
+    assert selection != "*"
+    assert "embedding" not in selection
+    assert absent_column not in selection.split(",")
+
+
 @pytest.mark.parametrize("category, keyword", [("skirt", "스커트"), ("one-piece", "원피스")])
 def test_candidate_query_separates_shared_skirt_dress_table(db_query, category, keyword):
     plan = candidates.build_attribute_text_search_plan(
@@ -126,7 +137,7 @@ def pipeline_without_io():
     return pipeline
 
 
-@pytest.mark.parametrize("strict_rows", [[], [{"id": "p1", "season": ["여름"], "gemini_image_embedding_768": [1.0, 0.0]}]])
+@pytest.mark.parametrize("strict_rows", [[], [{"id": "p1", "season": ["여름"], "similarity": 0.9}], RuntimeError("filtered RPC unavailable")])
 def test_search_passes_same_plan_scope_to_strict_and_rpc(monkeypatch, strict_rows):
     pipeline = pipeline_without_io()
     extraction = SimpleNamespace(
@@ -138,12 +149,18 @@ def test_search_passes_same_plan_scope_to_strict_and_rpc(monkeypatch, strict_row
     pipeline._translate = Mock(return_value="여름 바지")
     pipeline.retriever = SimpleNamespace(encode_text=lambda texts: np.array([[1.0, 0.0]]))
     pipeline._search_vectors = Mock(return_value=[{"id": "p2", "similarity": 0.5}])
-    fetch = Mock(return_value=strict_rows)
-    monkeypatch.setattr(service, "retrieve_candidates", fetch)
+    fetch = (Mock(side_effect=strict_rows) if isinstance(strict_rows, Exception) else
+             Mock(return_value=(strict_rows, {"matched_count": len(strict_rows), "request_count": 1})))
+    pipeline.vector_search = SimpleNamespace(search_filtered=fetch)
     monkeypatch.setattr(service, "generate_query_recommendation_explanation", lambda **kwargs: SimpleNamespace(
         recommendation_reason="추천 설명", to_metadata=lambda: {},
     ))
     scope = dict(table_filter="musinsa_pants", category2_filter="데님 팬츠", category2_keyword_filter="팬츠")
+    if isinstance(strict_rows, Exception):
+        with pytest.raises(RuntimeError, match="filtered RPC unavailable"):
+            pipeline.search("여름 바지", **scope)
+        pipeline._search_vectors.assert_not_called()
+        return
     _, _, metadata, _ = pipeline.search("여름 바지", **scope)
     timing = metadata["pipeline"]["timings"]
     assert timing["total_ms"] >= 0
@@ -157,11 +174,15 @@ def test_search_passes_same_plan_scope_to_strict_and_rpc(monkeypatch, strict_row
     assert all(stage["duration_ms"] >= 0 for stage in stages.values())
     for key, expected in scope.items():
         assert fetch.call_args.kwargs.get(key) == expected
+    assert fetch.call_args.kwargs["match_count"] == service.DEFAULT_RECOMMENDATION_COUNT
+    assert metadata["pipeline"]["retrieval_diagnostics"]["request_count"] == 1
     if not strict_rows:
+        assert metadata["pipeline"]["retrieval_diagnostics"]["fallback"]["reason"] == "no_strict_candidates"
         for key, expected in scope.items():
             assert pipeline._search_vectors.call_args.kwargs[key] == expected
     else:
         pipeline._search_vectors.assert_not_called()
+        assert metadata["pipeline"]["prefetch_count"] == service.DEFAULT_RECOMMENDATION_COUNT
 
 
 def run_reasoning(pipeline, provider="gemini"):

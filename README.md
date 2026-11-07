@@ -61,8 +61,8 @@ flowchart TD
     Filter["카테고리·속성으로 검색 계획 구성"]
     Embedding["설명문·선택적 소재 조건 임베딩"]
     Branch{"정확한 메타데이터 조건이 있는가?"}
-    REST["Supabase REST 후보 조회"]
-    Local["저장 벡터로 로컬 재정렬"]
+    Exact["DB RPC: 속성 필터 후 전체 일치 후보의 정확 코사인 정렬"]
+    Error["검색 오류 반환"]
     RPC["pgvector RPC: HNSW 후보 검색·재정렬"]
     Result["Top-K 상품 + 한국어 추천 이유"]
 
@@ -70,9 +70,10 @@ flowchart TD
     Input --> Description --> Embedding
     Filter --> Branch
     Embedding --> Branch
-    Branch -- 있음 --> REST
-    REST -- 후보 있음 --> Local --> Result
-    REST -- 후보 없음 또는 조회 실패 --> RPC
+    Branch -- 있음 --> Exact
+    Exact -- 후보 있음 --> Result
+    Exact -- 일치 후보 없음 --> RPC
+    Exact -- 조회 실패 --> Error
     Branch -- 없음 --> RPC --> Result
 ```
 
@@ -80,7 +81,7 @@ flowchart TD
 
 ### 1. 명시한 조건과 의미 기반 검색의 결합
 
-사용자가 언급한 속성의 종류를 먼저 확인하고 해당 값만 추출해, 말하지 않은 조건이 필터에 추가되는 것을 줄이도록 설계했습니다. 소매·기장·성별·계절·신축성·두께·핏 등 정확한 메타데이터 조건이 있으면 후보를 조회한 뒤 저장 벡터로 재정렬합니다. 조건이 없거나 후보 조회가 비어 있거나 실패하면 pgvector RPC 검색으로 전환합니다.
+사용자가 언급한 속성의 종류를 먼저 확인하고 해당 값만 추출해, 말하지 않은 조건이 필터에 추가되는 것을 줄이도록 설계했습니다. 소매·기장·성별·계절·신축성·두께·핏 등 정확한 메타데이터 조건이 있으면 DB 함수가 조건에 맞는 전체 후보의 코사인 유사도를 계산하고 상위 상품만 반환합니다. 후보를 ID순 1,000개로 제한하지 않으며, 상품 벡터도 네트워크로 내려받지 않습니다. 정확 조건이 없거나 일치 후보가 0개이면 기존 HNSW RPC 검색을 사용합니다. 조회 실패는 조건을 완화하지 않고 검색 오류로 반환합니다.
 
 색상과 소재는 모든 경우에 일치가 보장되는 필수 필터가 아닙니다. 검색용 설명과 유사도 계산에 반영하며, 참고 이미지와 문장의 요구가 다르면 명시한 텍스트 조건을 우선하도록 요청합니다.
 
@@ -98,12 +99,14 @@ flowchart TD
 
 | 경로 | 처리 방식 | 설계상 의미 |
 | --- | --- | --- |
-| 메타데이터 후보가 있는 경우 | Supabase REST로 후보와 저장 벡터를 가져와 Python에서 코사인 유사도 계산 | 명시 조건에 맞는 후보 안에서 순위를 계산 |
-| 벡터 검색으로 전환한 경우 | `match_fashion_items_768` RPC에서 이미지 HNSW 후보 검색 후 소재 점수 반영 | 메타데이터 조건이 없거나 후보 조회를 사용할 수 없는 요청도 검색 |
+| 정확 메타데이터 조건이 있는 경우 | `match_fashion_items_filtered_768` RPC에서 필터·정확 코사인 정렬을 수행하고 상위 상품만 전송 | ID순 후보 상한 없이 조건에 맞는 전체 후보에서 순위를 계산 |
+| 정확 조건이 없거나 일치 후보가 0개인 경우 | `match_fashion_items_768` RPC에서 이미지 HNSW 후보 검색 후 소재 점수 반영 | 근사 검색으로 후보를 찾고, 조건 완화 여부를 응답에 기록 |
 
-RPC의 최종 반환 수는 1~100개이며, 재정렬 후보는 `min(max(최종 반환 수 × 5, 50), 100)`개로 설정합니다. 기본 Top-10 요청은 후보 50개를 재정렬합니다. `hnsw.ef_search=100`은 HNSW 내부 탐색 폭으로, 재정렬 후보 수와 구분됩니다. 소재 벡터는 이미지 검색이 고른 후보의 순위를 조정하는 데 사용합니다.
+기존 HNSW RPC의 최종 반환 수는 1~100개이며, 재정렬 후보는 `min(max(최종 반환 수 × 5, 50), 100)`개로 설정합니다. 기본 Top-10 요청은 후보 50개를 재정렬합니다. `hnsw.ef_search=100`은 HNSW 내부 탐색 폭으로, 재정렬 후보 수와 구분됩니다. 소재 벡터는 이미지 검색이 고른 후보의 순위를 조정하는 데 사용합니다.
 
-구현은 [파이프라인 조율](pipeline/recommendation_service.py), [임베딩 인코딩](pipeline/retrieval/target_description_retrieval.py), [벡터 검색 SQL](pipeline/sql/match_fashion_items_768.sql)에서 확인할 수 있습니다.
+정확 필터 RPC의 `matched_count`는 조건에 맞아 비교한 후보 수이며, 실제 반환 상품 수와 다릅니다. 응답의 `pipeline.retrieval_diagnostics`에는 DB 필터·정렬 시간, HTTP 대기·본문 수신·JSON 파싱 시간과 전송 바이트를 기록합니다. DB 시간은 HTTP 시간에 포함되므로 두 값을 합산하지 않습니다.
+
+구현은 [파이프라인 조율](pipeline/recommendation_service.py), [임베딩 인코딩](pipeline/retrieval/target_description_retrieval.py), [정확 필터 검색 SQL](pipeline/sql/match_fashion_items_filtered_768.sql), [HNSW 검색 SQL](pipeline/sql/match_fashion_items_768.sql)에서 확인할 수 있습니다.
 
 ## 팀 구성과 역할
 
@@ -124,7 +127,7 @@ RPC의 최종 반환 수는 1~100개이며, 재정렬 후보는 `min(max(최종 
 | --- | --- |
 | Frontend | React 19, TypeScript, Vite, Tailwind CSS |
 | Backend | Python, FastAPI, Uvicorn |
-| 요청 해석·설명 생성 | Gemini (`gemini-3.5-flash`), Google Gen AI SDK |
+| 요청 해석·설명 생성 | Gemini (`gemini-3.5-flash-lite`), Google Gen AI SDK |
 | Embedding | Gemini Embedding 2 (`gemini-embedding-2`), 768차원 |
 | Retrieval | Supabase PostgreSQL, pgvector, HNSW, 코사인 유사도 |
 | Deployment | Vercel, Cloudtype |
