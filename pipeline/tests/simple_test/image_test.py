@@ -51,6 +51,8 @@ TEST_QUERIES = [
 
 
 def main():
+    # pytest 단위 테스트가 아니라 모델을 직접 실행하고 결과 JSON을 쓰는 독립 실험이다.
+    # 운영 /search를 호출하지 않으므로 이 결과만으로 전체 검색 성공을 확인할 수는 없다.
     output_path = os.path.join(os.path.dirname(__file__), "image_test_results.json")
 
     print("\n" + "="*60)

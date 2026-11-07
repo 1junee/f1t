@@ -1,3 +1,4 @@
+// 카테고리 탐색용 REST 조회다. 자연어·이미지 검색은 baselineSearch.ts에서 백엔드로 보낸다.
 import type { Product, ProductTable } from '../types/product'
 
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL as string | undefined
@@ -5,6 +6,7 @@ const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY as string | undef
 const supabaseImageTransformEnabled =
   import.meta.env.VITE_SUPABASE_IMAGE_TRANSFORM_ENABLED === 'true'
 const baseProductSelect =
+  // 목록에 필요한 열만 요청하고, 테이블마다 존재하는 의류 속성 열을 아래에서 덧붙인다.
   'id,name,brand,image_url,category1,category2,price,color'
 const productSelectByTable: Record<ProductTable, string> = {
   musinsa_pants: `${baseProductSelect},length,fit,fabric`,
@@ -36,6 +38,7 @@ type ProductThumbnailOptions = {
 }
 
 function normalizeCategoryText(value?: string | null) {
+  // 같은 한글/공백 표현을 통일해 화면에서 같은 카테고리가 중복되는 것을 줄인다.
   return (value ?? '')
     .normalize('NFC')
     .replace(/\u00a0/g, ' ')
@@ -45,6 +48,7 @@ function normalizeCategoryText(value?: string | null) {
 }
 
 function getSearchTerms(searchText: string) {
+  // 불용어 제거와 작은 동의어 사전으로 문자열 조건을 확장하는 규칙 기반 처리다.
   const stopWords = new Set([
     '찾아줘',
     '추천해줘',
@@ -96,6 +100,7 @@ export function getProductImageUrl(product: Product) {
     return ''
   }
 
+  // 저장된 URL이 없으면 상품 테이블별 Storage 버킷과 상품 ID로 이미지 주소를 만든다.
   const storageBucketByTable: Record<ProductTable, string> = {
     musinsa_pants: 'musinsa_pants',
     musinsa_skirt_dress: 'skirt_dress',
@@ -117,6 +122,7 @@ export function getSupabaseImageThumbnailUrl(
   }: ProductThumbnailOptions = {},
 ) {
   if (!supabaseImageTransformEnabled) {
+    // 이미지 변환 기능을 켜지 않은 배포에서는 저장된 원본 URL을 그대로 사용한다.
     return imageUrl
   }
 
@@ -176,7 +182,10 @@ export async function fetchProducts({
 
   url.searchParams.set('select', productSelectByTable[table])
   url.searchParams.set('offset', String(offset))
+  // 서버가 전체 데이터를 보낸 뒤 자르는 것이 아니라 REST 요청 자체에 페이지 범위를 넣는다.
   url.searchParams.set('limit', String(limit))
+  // 같은 데이터에서 페이지를 다시 읽어도 순서가 바뀌지 않도록 고유 상품 ID로 정렬한다.
+  url.searchParams.set('order', 'id.asc')
 
   if (category1) {
     url.searchParams.set('category1', `eq.${category1}`)
@@ -190,6 +199,7 @@ export async function fetchProducts({
     url.searchParams.set('category2', `ilike.*${category2Keyword}*`)
   }
 
+  // 이 경로의 검색은 문자열 부분 일치이며, 임베딩 유사도 검색이 아니다.
   if (trimmedSearch) {
     const searchTerms = getSearchTerms(trimmedSearch)
     const searchableColumns = [
@@ -203,6 +213,7 @@ export async function fetchProducts({
 
     url.searchParams.set(
       'or',
+      // 여러 단어/열 중 하나만 일치해도 포함한다. 모든 조건을 만족하는 AND 검색은 아니다.
       `(${searchTerms
         .flatMap((term) =>
           searchableColumns.map((column) => `${column}.ilike.*${term}*`),
@@ -221,7 +232,8 @@ export async function fetchProducts({
 
   if (response.status === 416) {
     // offset이 전체 개수를 초과 → 더 이상 상품 없음
-    return { products: [], totalCount: 0 }
+    const total = response.headers.get('content-range')?.split('/')[1]
+    return { products: [], totalCount: total && total !== '*' ? Number(total) : null }
   }
 
   if (!response.ok) {
@@ -229,15 +241,17 @@ export async function fetchProducts({
   }
 
   const products = (await response.json()) as Product[]
+  // 현재 페이지 행 수와 전체 조건 일치 개수를 구분해 무한 스크롤 종료 여부를 판단한다.
   const contentRange = response.headers.get('content-range')
   const totalCountText = contentRange?.split('/')[1]
   const totalCount =
     totalCountText && totalCountText !== '*'
       ? Number(totalCountText)
-      : products.length
+      : null
 
   return {
     products: products.map((product) => ({
+      // 어느 테이블에서 왔는지 붙여 카드 키와 이미지 버킷 경로를 구분한다.
       ...product,
       _sourceTable: table,
     })),
@@ -255,6 +269,7 @@ export async function fetchCategoryRows(table: ProductTable) {
   const url = new URL(`${supabaseUrl}/rest/v1/${table}`)
   url.searchParams.set('select', 'category1,category2')
   url.searchParams.set('limit', '1000')
+  // 전체 테이블의 고유 카테고리를 집계하는 API가 아니라 최대 1,000개 행을 읽는 방식이다.
 
   const response = await fetch(url, {
     headers: {
@@ -272,6 +287,7 @@ export async function fetchCategoryRows(table: ProductTable) {
     category2?: string | null
   }>
 
+  // 조회한 최대 1,000개 행에서 중복을 제거해 사이드바 카테고리 목록을 만든다.
   const seen = new Set<string>()
 
   return rows.reduce<CategoryRow[]>((categories, row) => {

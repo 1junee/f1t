@@ -33,3 +33,7 @@ dist/
 pipeline/database_images/
 pipeline/ref_images/
 pipeline/pipeline_output.json
+
+# Local documentation and experiments
+/docs/
+/experiments/

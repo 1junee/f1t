@@ -8,6 +8,8 @@
 
 진입점은 `recommendation_service.py`이며, 아래 단계를 조율합니다.
 
+함수별로 따라 읽는 순서는 [코드 읽기 가이드](../docs/CODE_GUIDE.md)에 정리했습니다.
+
 | 파일 | 역할 |
 |---|---|
 | `intent/intent_extraction.py` | 사용자가 언급한 속성을 추출하고, 의류 종류가 명확할 때만 카테고리 도출 |
@@ -34,13 +36,16 @@
   ├→ 메타데이터 추출 — Gemini VLM (명시된 속성만)
   └→ Target Description 생성 — Gemini gemini-3.5-flash
     ↓
-[3단계] 테이블 라우팅 + SQL 후보 필터링
+[3단계] 테이블·조건·후보 수를 정하는 검색 계획 생성 (DB 조회 전)
     ↓
 [4단계 — 병렬]
-  ├→ Gemini Embedding 인코딩 → Supabase 벡터 검색
+  ├→ 목표 설명문 한국어 번역
+  ├→ 목표 설명문 Gemini Embedding 인코딩
   └→ (fabric 속성 있을 시) fabric 임베딩 인코딩
     ↓
-[5단계] 한국어 추천 이유 생성
+[5단계] SQL 후보 조회 + 로컬 재정렬 / RPC 벡터 검색 → 속성 후처리
+    ↓
+[6단계] 한국어 추천 이유 생성
     ↓
 API 응답 반환
 ```
@@ -57,7 +62,8 @@ API 응답 반환
 
 - **이미지 유사도**: `gemini_image_embedding_768` — 상품 이미지 vs. target description 텍스트
 - **fabric 유사도**: `gemini_fabric_text_embedding_768` — 상품 소재 설명 vs. 사용자 요청 소재
-- fabric 속성이 없거나 임베딩이 없으면 이미지 유사도만 사용
+- 요청에 fabric 속성이 없으면 이미지 유사도만 사용
+- 요청에 fabric 속성이 있는데 상품의 소재 벡터가 없으면 소재 점수는 0으로 계산
 
 가중치는 `recommendation_service.py`의 `_rank_stored_gemini_vectors(fabric_weight=0.2)` 및 Supabase RPC 함수 `match_fashion_items_768`에서 적용합니다.
 

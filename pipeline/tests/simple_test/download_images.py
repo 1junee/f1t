@@ -38,6 +38,7 @@ os.makedirs(SAVE_DIR, exist_ok=True)
 
 
 def fetch_image_url(item_id: int, table: str) -> str | None:
+    # DB에서는 이미지 주소만 읽는다. 이미지 바이트 다운로드는 다음 함수가 담당한다.
     if not SUPABASE_URL or not SUPABASE_KEY:
         raise RuntimeError("SUPABASE_URL / SUPABASE_KEY 환경변수가 설정되지 않았습니다.")
 
@@ -64,6 +65,7 @@ def download_image(image_url: str, save_path: str) -> bool:
 
 
 def main():
+    # 실험용 참고 이미지를 로컬에 저장하고 상품 ID → 저장 경로 목록을 만든다. DB는 수정하지 않는다.
     id_to_path = {}
 
     for item_id, table in ID_TABLE_MAP.items():

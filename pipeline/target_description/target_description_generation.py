@@ -33,6 +33,7 @@ TARGETDESCRIPTION_FASHION_SYSTEM_PROMPT = (
     "for image-based retrieval."
 )
 
+# 참고 이미지 경로에서는 이미지의 특징을 유지하되, 충돌하는 사용자 문장을 우선하도록 한다.
 TARGETDESCRIPTION_REFERENCE_IMAGE_PROMPT = """You are a fashion search description expert and professional fashion stylist. You are given a reference fashion image and optional manipulation text. Your goal is to generate a target image description for retrieval by combining the visual evidence from the image with the user's text.
 
 ## Guidelines on generating the Original Image Description
@@ -81,6 +82,7 @@ Return ONLY a valid JSON object with the following structure:
     "Target Image Description": "..."
 }"""
 
+# 텍스트만 있을 때는 참조 이미지의 특징을 가정하지 않고, 요청한 조건 중심으로 설명하게 한다.
 TARGETDESCRIPTION_TEXT_ONLY_PROMPT = """You are a fashion search description expert and professional fashion stylist. You are given a user's fashion search request. Your goal is to generate a target image description that can be used for image retrieval.
 
 ## Guidelines on generating the Original Image Description
@@ -124,6 +126,7 @@ def build_target_description_prompt(
     request_text: str,
     has_image: bool,
 ) -> str:
+    # 이미지가 있으면 유지할 특징과 수정할 특징을 합치고, 없으면 요청 문장만 해석한다.
     if has_image:
         return (
             f"{TARGETDESCRIPTION_REFERENCE_IMAGE_PROMPT}\n\n"
@@ -141,7 +144,8 @@ def build_target_description_prompt(
     )
 
 
-# --- Reasoning clients ---
+# 아래 클라이언트는 검색용 설명문을 생성한다. 임베딩은 retrieval 모듈에서 별도로 만든다.
+# 어떤 provider를 쓰고 실패 시 무엇으로 전환할지는 recommendation_service.py가 결정한다.
 
 MODEL_NAME = "Qwen/Qwen3-VL-32B-Instruct"
 GEMINI_MODEL_NAME = "gemini-3.5-flash"
@@ -154,6 +158,7 @@ DEFAULT_IMAGE_ONLY_QUERY = "Find a fashion item visually similar to the referenc
 
 
 def resolve_target_description_model(model_name: str | None = None) -> str:
+    # 메타데이터 모델과 별도로 설명문 생성 모델만 바꿀 수 있는 설정 경로다.
     return (
         model_name
         or os.getenv(TARGET_DESCRIPTION_MODEL_ENV)
@@ -164,6 +169,7 @@ def resolve_target_description_model(model_name: str | None = None) -> str:
 
 def parse_json_from_text(text):
     """LLM 출력에서 JSON 추출"""
+    # 본문 전체를 그대로 믿지 않고 JSON 부분만 읽는다. 실패하면 호출자가 원문 사용 여부를 정한다.
     try:
         match = re.search(r'```json\s*(.*?)\s*```', text, re.DOTALL)
         if match:
@@ -190,7 +196,12 @@ class ReasoningWarning:
         }
 
 
+class InvalidSearchInput(ValueError):
+    """패션 검색에 맞지 않는 입력. 제공자 장애와 달리 원문 검색으로 대체하지 않는다."""
+
+
 class ReasoningProviderError(RuntimeError):
+    # 사용자에게 보여줄 경고와 디버깅용 상세 정보를 분리해 보관한다.
     def __init__(
         self,
         code: str,
@@ -205,6 +216,7 @@ class ReasoningProviderError(RuntimeError):
         self.detail = detail or ""
 
     def to_warning(self) -> ReasoningWarning:
+        # 경고 응답에는 원격 서버의 상세 오류 본문을 포함하지 않는다.
         return ReasoningWarning(
             code=self.code,
             label=self.label,
@@ -213,6 +225,7 @@ class ReasoningProviderError(RuntimeError):
 
 
 def normalize_reasoning_result(parsed: dict[str, Any], fallback: str) -> dict[str, Any]:
+    # 제공자별 응답을 공통 키로 맞춘다. 검색 벡터의 입력은 Target Image Description이다.
     return {
         "Original Image Description": str(parsed.get("Original Image Description", "")),
         "Thoughts": str(parsed.get("Thoughts", "")),
@@ -224,6 +237,7 @@ def normalize_reasoning_result(parsed: dict[str, Any], fallback: str) -> dict[st
 
 
 class GeminiReasoningClient:
+    # 기본 설명 생성 경로: 텍스트와 선택적 이미지를 Gemini REST API에 전달한다.
     def __init__(
         self,
         api_key: str | None = None,
@@ -247,6 +261,7 @@ class GeminiReasoningClient:
         normalized_text = manipulation_text.strip()
 
         if image_path:
+            # 로컬 실행용 경로 입력도 HTTP 업로드와 같은 바이트 입력으로 맞춘다.
             if not os.path.exists(image_path):
                 raise FileNotFoundError(f"Image not found: {image_path}")
 
@@ -262,6 +277,7 @@ class GeminiReasoningClient:
             }.get(suffix, image_mime_type or "image/jpeg")
 
         if not normalized_text:
+            # 이미지만 올린 요청도 모델에는 '비슷한 패션 아이템'이라는 기본 요청을 전달한다.
             normalized_text = DEFAULT_IMAGE_ONLY_QUERY
 
         prompt = self._build_prompt(
@@ -273,17 +289,20 @@ class GeminiReasoningClient:
             image_bytes=image_bytes,
             image_mime_type=image_mime_type,
         )
+        # 이미지 묘사·해석·최종 설명을 한 응답에서 받으며, 필드마다 모델을 다시 호출하지 않는다.
         parsed = parse_json_from_text(response_text)
 
+        # 모델이 명시적으로 부적절하다고 답했을 때만 입력 오류를 발생시킨다.
         if parsed and image_bytes and self._is_explicit_false(parsed.get("Is Fashion Image")):
-            raise ValueError("옷이 정확히 보이는 사진을 첨부하세요.")
+            raise InvalidSearchInput("옷이 정확히 보이는 사진을 첨부하세요.")
 
         if parsed and self._is_explicit_false(parsed.get("Is Fashion Query")):
-            raise ValueError("패션 관련 검색어를 입력해주세요.")
+            raise InvalidSearchInput("패션 관련 검색어를 입력해주세요.")
 
         if parsed and parsed.get("Target Image Description"):
             return normalize_reasoning_result(parsed, fallback=normalized_text)
 
+        # 응답에 설명문이 없으면 원래 요청 문장을 검색용 설명으로 사용한다.
         return {
             "Original Image Description": "",
             "Thoughts": "",
@@ -291,6 +310,7 @@ class GeminiReasoningClient:
             "Target Image Description": normalized_text,
         }
 
+    # 아래 번역·키워드 메서드는 보조 기능이다. 현재 검색의 번역은 서비스 모듈에서 수행한다.
     def translate_to_korean(self, text: str) -> str:
         normalized_text = text.strip()
         if not normalized_text:
@@ -360,6 +380,7 @@ class GeminiReasoningClient:
         parts: list[dict[str, Any]] = []
 
         if image_bytes:
+            # 별도 업로드 없이 이미지 바이트를 base64로 넣어 텍스트와 함께 보낸다.
             parts.append(
                 {
                     "inline_data": {
@@ -372,6 +393,7 @@ class GeminiReasoningClient:
         parts.append({"text": prompt})
 
         request_body = {
+            # 공통 역할 지시와 사용자별 입력을 나눠 API가 요구하는 요청 구조를 만든다.
             "systemInstruction": {"parts": [{"text": TARGETDESCRIPTION_FASHION_SYSTEM_PROMPT}]},
             "contents": [{"role": "user", "parts": parts}],
             "generationConfig": {
@@ -395,6 +417,7 @@ class GeminiReasoningClient:
             with urllib.request.urlopen(request, timeout=self.timeout) as response:
                 response_json = json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
+            # 제공자 오류를 공통 예외로 바꾸면 상위 서비스가 대체 경로를 선택할 수 있다.
             detail = exc.read().decode("utf-8", errors="replace")
             code, label, message = self._classify_http_error(exc.code, detail)
             raise ReasoningProviderError(code, label, message, detail=detail) from exc
@@ -424,6 +447,7 @@ class GeminiReasoningClient:
             ) from exc
 
     def _classify_http_error(self, status_code: int, detail: str) -> tuple[str, str, str]:
+        # 한도 초과를 일반 연결 오류와 구분해 화면에서 원인을 안내할 수 있게 한다.
         normalized_detail = detail.lower()
 
         if (
@@ -444,6 +468,7 @@ class GeminiReasoningClient:
         )
 
     def _is_explicit_false(self, value: Any) -> bool:
+        # JSON 불리언뿐 아니라 모델이 문자열로 반환한 false도 같은 의미로 처리한다.
         if value is False:
             return True
 
@@ -454,6 +479,7 @@ class GeminiReasoningClient:
 
 
 class OpenAIReasoningClient:
+    # provider=openai로 선택했을 때 사용하는 대안 경로이며, 결과 키는 Gemini와 같다.
     def __init__(
         self,
         api_key: str | None = None,
@@ -499,10 +525,10 @@ class OpenAIReasoningClient:
         parsed = parse_json_from_text(response_text)
 
         if parsed and image_bytes and self._is_explicit_false(parsed.get("Is Fashion Image")):
-            raise ValueError("옷이 정확히 보이는 사진을 첨부하세요.")
+            raise InvalidSearchInput("옷이 정확히 보이는 사진을 첨부하세요.")
 
         if parsed and self._is_explicit_false(parsed.get("Is Fashion Query")):
-            raise ValueError("패션 관련 검색어를 입력해주세요.")
+            raise InvalidSearchInput("패션 관련 검색어를 입력해주세요.")
 
         if parsed and parsed.get("Target Image Description"):
             return normalize_reasoning_result(parsed, fallback=normalized_text)
@@ -531,6 +557,7 @@ class OpenAIReasoningClient:
         image_bytes: bytes | None = None,
         image_mime_type: str | None = None,
     ) -> str:
+        # 같은 프롬프트라도 제공자마다 이미지와 메시지를 담는 API 형식은 다르다.
         content: list[dict[str, Any]] = []
 
         if image_bytes:
@@ -678,6 +705,7 @@ class OpenAIReasoningClient:
 
 
 class Qwen3VLReasoningClient:
+    # 로컬 설명 생성 경로다. 임베딩 전용 Qwen3-VL-Embedding과는 다른 모델이다.
     def __init__(
         self,
         model_name: str | None = None,
@@ -707,6 +735,7 @@ class Qwen3VLReasoningClient:
 
     @property
     def provider_id(self) -> str:
+        # 모델 표시용 이름을 일정한 문자열로 만든다. 이 함수가 실제 모델을 선택하지는 않는다.
         normalized = re.sub(r"[^a-z0-9]+", "_", self.model_name.lower()).strip("_")
 
         if "qwen3_5" in normalized and "0_8b" in normalized:
@@ -735,6 +764,7 @@ class Qwen3VLReasoningClient:
 
         image = None
         if image_bytes:
+            # 로컬 모델의 전처리기가 받는 PIL RGB 이미지로 변환한다.
             image = Image.open(BytesIO(image_bytes)).convert("RGB")
 
         prompt = self._build_prompt(
@@ -745,10 +775,10 @@ class Qwen3VLReasoningClient:
         parsed = parse_json_from_text(response_text)
 
         if parsed and image and self._is_explicit_false(parsed.get("Is Fashion Image")):
-            raise ValueError("옷이 정확히 보이는 사진을 첨부하세요.")
+            raise InvalidSearchInput("옷이 정확히 보이는 사진을 첨부하세요.")
 
         if parsed and self._is_explicit_false(parsed.get("Is Fashion Query")):
-            raise ValueError("패션 관련 검색어를 입력해주세요.")
+            raise InvalidSearchInput("패션 관련 검색어를 입력해주세요.")
 
         if parsed and parsed.get("Target Image Description"):
             return normalize_reasoning_result(parsed, fallback=normalized_text)
@@ -804,6 +834,7 @@ class Qwen3VLReasoningClient:
         return build_target_description_prompt(manipulation_text, has_image)
 
     def _load(self) -> None:
+        # 실제 추론이 필요할 때 한 번 로드한다. 모델 파일은 로컬 캐시에 있어야 한다.
         if self.processor is not None and self.model is not None:
             return
 
@@ -834,6 +865,7 @@ class Qwen3VLReasoningClient:
             }
 
             if self.device == "cpu" or not torch.cuda.is_available():
+                # 현재 구현은 CPU 또는 CUDA가 없는 환경에서 float32로 모델을 읽는다.
                 kwargs["dtype"] = torch.float32
             else:
                 kwargs["dtype"] = torch.bfloat16
@@ -885,6 +917,7 @@ class Qwen3VLReasoningClient:
         architectures = model_config.get("architectures") or []
         model_type = str(model_config.get("model_type") or "")
 
+        # 모델 설정에 적힌 클래스를 먼저 찾고, 없으면 범용 이미지-텍스트 생성 클래스를 시도한다.
         for architecture in architectures:
             model_cls = getattr(transformers, str(architecture), None)
             if model_cls is not None:
@@ -945,12 +978,14 @@ class Qwen3VLReasoningClient:
             )
             inputs = inputs.to(self.model.device)
 
+            # 학습이 아닌 추론이므로 기울기를 저장하지 않아 불필요한 메모리 사용을 줄인다.
             with torch.no_grad():
                 output_ids = self.model.generate(
                     **inputs,
                     max_new_tokens=self.max_new_tokens,
                 )
 
+            # 생성 결과에는 입력 토큰도 들어 있으므로, 새로 생성된 답변 부분만 디코딩한다.
             generated_ids = [
                 output_ids_item[len(input_ids_item):]
                 for input_ids_item, output_ids_item in zip(inputs.input_ids, output_ids)

@@ -1,3 +1,4 @@
+# 잘못된 입력과 내부 오류가 외부 API에서 어떻게 처리되는지 검사한다.
 from __future__ import annotations
 
 from io import BytesIO
@@ -8,7 +9,13 @@ from fastapi import HTTPException, UploadFile
 from starlette.datastructures import Headers
 
 from backend import api
+from backend.request_limits import RequestLimiter
 from pipeline.recommendation_service import FashionRecommendationPipeline
+
+
+@pytest.fixture(autouse=True)
+def fresh_model_request_limits(monkeypatch):
+    monkeypatch.setattr(api, "request_limiter", RequestLimiter())
 
 
 def make_upload(content: bytes, content_type: str = "image/jpeg") -> UploadFile:

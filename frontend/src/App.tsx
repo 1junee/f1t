@@ -19,6 +19,8 @@ import {
 import type { BaselineSearchResponse, ProviderModels } from './lib/baselineSearch'
 import type { CategoryRow } from './lib/supabaseRest'
 import type { Product, ProductTable } from './types/product'
+import { appendUniqueProducts, loadGroupedCatalogPage } from './lib/catalogPagination'
+import type { CatalogPagination } from './lib/catalogPagination'
 
 type CategoryGroup = {
   id: string
@@ -94,7 +96,7 @@ const pageNavItems: { id: NavItemId; label: string }[] = [
   { id: 'about', label: '소개' },
 ]
 
-const defaultRecentSearches: RecentSearchItem[] = [
+const searchExamples: RecentSearchItem[] = [
   {
     id: 'sample-1',
     query: '이 이미지랑 비슷한 색으로 긴소매 셔츠 찾아줘',
@@ -110,44 +112,15 @@ const defaultRecentSearches: RecentSearchItem[] = [
 ]
 
 const textSearchProgressSteps = [
-  {
-    title: '요청을 읽고 있어요',
-    description:
-      '색, 핏, 소재, 활용 상황 등 입력한 내용을 먼저 파악하고 있어요.',
-  },
-  {
-    title: '핵심 조건을 고르고 있어요',
-    description:
-      '색, 핏, 소재, 활용 상황처럼 결과에 중요한 단서를 정리하고 있어요.',
-  },
-  {
-    title: '후보 상품을 찾고 있어요',
-    description:
-      '요청에 맞는 후보들을 추리고 있어요.',
-  },
+  { title: '스타일에 맞는 상품을 찾고 있어요', description: '색상이나 소재를 함께 적으면 원하는 옷을 찾는 데 도움이 돼요.' },
+  { title: '스타일에 맞는 상품을 찾고 있어요', description: '계절이나 입을 상황도 검색 조건으로 사용할 수 있어요.' },
+  { title: '스타일에 맞는 상품을 찾고 있어요', description: '검색이 끝나면 아래에서 상품을 확인할 수 있어요.' },
 ]
 
 const imageSearchProgressSteps = [
-  {
-    title: '이미지와 요청을 함께 보고 있어요',
-    description:
-      '첨부한 이미지에서 참고할 부분과 문장 속 조건을 나눠 읽고 있어요.',
-  },
-  {
-    title: '이미지 디테일을 살펴보고 있어요',
-    description:
-      '색, 형태, 기장, 패턴처럼 검색에 필요한 단서를 잡고 있어요.',
-  },
-  {
-    title: '조건을 맞춰보고 있어요',
-    description:
-      '이미지의 디테일과 입력한 조건을 함께 반영해 후보 기준을 정리하고 있어요.',
-  },
-  {
-    title: '후보 상품을 찾고 있어요',
-    description:
-      '요청에 맞는 상품부터 확인할 수 있도록 결과를 추리고 있어요.',
-  },
+  { title: '스타일에 맞는 상품을 찾고 있어요', description: '사진과 원하는 조건을 함께 참고해 상품을 찾아요.' },
+  { title: '스타일에 맞는 상품을 찾고 있어요', description: '사진에서 바꾸고 싶은 색상이나 기장을 문장으로 적어도 좋아요.' },
+  { title: '스타일에 맞는 상품을 찾고 있어요', description: '검색이 끝나면 아래에서 상품을 확인할 수 있어요.' },
 ]
 
 function getCategoryKey(category2: string) {
@@ -169,6 +142,7 @@ function formatPrice(price: Product['price']) {
 }
 
 function handleImageFallback(event: SyntheticEvent<HTMLImageElement>) {
+  // 썸네일 로드가 실패하면 원본으로 한 번 바꾼다. 속성을 지워 무한 재시도를 막는다.
   const image = event.currentTarget
   const fallbackSrc = image.dataset.fallbackSrc
 
@@ -305,6 +279,7 @@ function getParsedAttributeItems(pipeline?: BaselineSearchResponse['pipeline']) 
 }
 
 function AboutPage() {
+  // 소개 내용만 그리는 정적 컴포넌트다. 검색 상태나 API 호출은 갖지 않는다.
   return (
     <section>
       <p className="text-sm font-medium text-slate-500">About F1T</p>
@@ -373,11 +348,14 @@ function PolicyModal({
 }: {
   onClose: () => void
 }) {
+  // 닫기 동작은 부모가 전달한 onClose로 위임한다. 열림 여부는 App의 activeModal이 결정한다.
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/35 px-4 py-8 backdrop-blur-sm"
       role="dialog"
       aria-modal="true"
+      data-f1t-dialog="about"
+      tabIndex={-1}
       aria-labelledby="about-modal-title"
       onMouseDown={onClose}
     >
@@ -410,6 +388,7 @@ function PolicyModal({
 }
 
 function App() {
+  // DOM 위치와 비동기 요청 식별자는 ref, 화면에 표시할 입력·결과는 state로 관리한다.
   const imageInputRef = useRef<HTMLInputElement | null>(null)
   const loadMoreRef = useRef<HTMLDivElement | null>(null)
   const resultsSectionRef = useRef<HTMLDivElement | null>(null)
@@ -421,6 +400,10 @@ function App() {
     previousTop: number
   } | null>(null)
   const requestIdRef = useRef(0)
+  const catalogPaginationRef = useRef<CatalogPagination>({})
+  const catalogRequestRef = useRef<number | null>(null)
+  const catalogReadyRef = useRef(false)
+  // 요청 번호는 응답을 버릴지 판단하는 값이다. fetch 자체를 취소하는 AbortController와 다르다.
   const searchCompleteDelayRef = useRef<number | null>(null)
   const searchCompleteHideDelayRef = useRef<number | null>(null)
   const [activeModal, setActiveModal] = useState<ModalPageId | null>(null)
@@ -428,32 +411,39 @@ function App() {
   const [activeCategoryId, setActiveCategoryId] = useState('all')
   const [openCategoryIds, setOpenCategoryIds] = useState(() => new Set<string>())
   const [categoryRows, setCategoryRows] = useState<CategoryRow[]>([])
+  // 입력 중인 문장과 마지막으로 제출한 문장을 분리해 결과 설명이 바뀌지 않게 한다.
   const [query, setQuery] = useState('')
   const [submittedQuery, setSubmittedQuery] = useState('')
   const [submittedHadImage, setSubmittedHadImage] = useState(false)
   const [searchRunId, setSearchRunId] = useState(0)
+  // 같은 카테고리라도 홈/재시도에서 값을 올리면 카탈로그 조회 effect를 다시 실행한다.
   const [isUnderstandingRequest, setIsUnderstandingRequest] = useState(false)
   const [isSearchCompleteVisible, setIsSearchCompleteVisible] = useState(false)
   const [searchProgressIndex, setSearchProgressIndex] = useState(0)
   const [selectedImage, setSelectedImage] = useState<SelectedImage | null>(null)
   const [isImageDragging, setIsImageDragging] = useState(false)
   const [selectedProvider, setSelectedProvider] = useState('gemini')
+  // provider는 요청 해석·설명 생성 모델 선택이며, 검색 임베딩 모델을 바꾸는 메뉴는 아니다.
   const [isProviderMenuOpen, setIsProviderMenuOpen] = useState(false)
   const [providerModels, setProviderModels] = useState<ProviderModels>({
     gemini: 'gemini-3.5-flash',
     openai: 'gpt-5.4-nano',
     qwen: 'qwen3.5-0.8B',
   })
+  // 모델 검색 응답과 카탈로그 상품 목록은 별도 상태다. 아래 렌더링에서 두 경로를 구분한다.
   const [baselineSearchResponse, setBaselineSearchResponse] =
     useState<BaselineSearchResponse | null>(null)
-  const [recentSearches, setRecentSearches] = useState(defaultRecentSearches)
+  const [recentSearches, setRecentSearches] = useState<RecentSearchItem[]>([])
   const [likedItemIds, setLikedItemIds] = useState(() => new Set<string>())
   const [products, setProducts] = useState<Product[]>([])
   const [totalProductCount, setTotalProductCount] = useState<number | null>(null)
+  const [hasMoreProducts, setHasMoreProducts] = useState(true)
   const [selectedProductForDetail, setSelectedProductForDetail] = useState<Product | null>(null)
   const [isLoading, setIsLoading] = useState(false)
+  // isLoading은 카탈로그 조회, isUnderstandingRequest는 AI 검색 대기 상태다.
   const [errorMessage, setErrorMessage] = useState('')
 
+  // DB의 세부 카테고리 행을 화면의 상의·바지·원피스·스커트 그룹에 연결한다.
   const categoryTree = useMemo(
     () =>
       categoryGroups.map((group) => {
@@ -529,6 +519,7 @@ function App() {
       Math.min(searchProgressIndex, searchProgressSteps.length - 1)
     ]
   const requestSummaryItems = useMemo(() => {
+    // 입력창의 현재 문장 대신 제출 당시 조건을 결과 위에 표시한다.
     const items: string[] = []
 
     if (activeCategory.label !== allCategory.label) {
@@ -548,6 +539,8 @@ function App() {
   const baselineResults = baselineSearchResponse?.results ?? []
   const isBaselineSearch = Boolean(baselineSearchResponse)
   const hasSubmittedSearch = isBaselineSearch || Boolean(submittedQuery) || submittedHadImage
+  // 대화상자 하나를 기준으로 초점 관리 effect가 동작하도록 화면 상태를 이름으로 정리한다.
+  const activeDialog = selectedProductForDetail ? 'product' : activeModal ? 'about' : isSidebarOpen ? 'drawer' : null
   const reasoningBadges = useMemo(
     () => getReasoningBadges(baselineSearchResponse?.reasoning, providerModels, selectedProvider),
     [baselineSearchResponse?.reasoning, providerModels, selectedProvider],
@@ -568,6 +561,7 @@ function App() {
       Boolean(detailTargetDescription) ||
       Boolean(pipelineIntentLabel))
 
+  // 첫 진입 때 서버를 준비하고, 모델 선택 메뉴에 표시할 서버 설정의 모델명을 조회한다.
   useEffect(() => {
     void warmBaselineSearch()
 
@@ -580,6 +574,7 @@ function App() {
 
   useEffect(() => {
     let ignore = false
+    // 세 테이블의 카테고리 목록은 서로 의존하지 않아 Promise.all로 함께 가져온다.
 
     async function loadCategories() {
       if (!hasSupabaseConfig()) {
@@ -608,12 +603,19 @@ function App() {
     loadCategories()
 
     return () => {
+      // 화면이 사라진 뒤 응답이 와도 setState하지 않는다. 네트워크 요청 취소는 아니다.
       ignore = true
     }
   }, [])
 
+  // 카테고리를 둘러볼 때는 모델 호출 없이 Supabase에서 상품 페이지를 가져온다.
   const loadProductPage = useCallback(
     async (offset: number, append: boolean, requestId = requestIdRef.current) => {
+      // offset은 시작 위치, append는 기존 목록에 이어 붙일지 여부다.
+      // 같은 화면의 무한 스크롤 콜백이 연속 실행되어도 한 페이지를 중복 요청하지 않는다.
+      if (requestId !== requestIdRef.current || catalogRequestRef.current === requestId) return
+      // 전환 직후의 오래된 observer가 offset 0 조회보다 먼저 append를 시작하지 못하게 한다.
+      if (append && !catalogReadyRef.current) return
       if (!hasSupabaseConfig()) {
         setErrorMessage(
           'Supabase 연결을 위해 frontend/.env.local에 공개용 anon key를 설정해 주세요.',
@@ -621,43 +623,32 @@ function App() {
         return
       }
 
+      catalogRequestRef.current = requestId
       setIsLoading(true)
       setErrorMessage('')
 
       if (!append) {
+        catalogReadyRef.current = false
         setTotalProductCount(null)
       }
 
       try {
-        let result: Awaited<ReturnType<typeof fetchProducts>>
+        let result: { products: Product[]; totalCount: number | null }
+        let nextPagination = catalogPaginationRef.current
+        let hasMore: boolean
 
         if (activeCategory.isAll) {
-          const limitPerGroup = Math.ceil(
-            PRODUCTS_PER_PAGE / categoryGroups.length,
+          // 전체 탭은 네 카테고리에서 분할 조회한 페이지를 합친다. 추천 순위 정렬은 하지 않는다.
+          const page = await loadGroupedCatalogPage(
+            categoryGroups,
+            append ? catalogPaginationRef.current : {},
+            fetchProducts,
+            PRODUCTS_PER_PAGE,
+            submittedQuery,
           )
-          const offsetPerGroup = Math.floor(offset / categoryGroups.length)
-          const tableResults = await Promise.all(
-            categoryGroups.map((group) =>
-              fetchProducts({
-                table: group.table,
-                category1: group.category1,
-                category2Keyword: group.category2Keyword,
-                searchText: submittedQuery,
-                offset: offsetPerGroup,
-                limit: limitPerGroup,
-              }),
-            ),
-          )
-
-          result = {
-            products: tableResults.flatMap(
-              (tableResult) => tableResult.products,
-            ),
-            totalCount: tableResults.reduce(
-              (sum, tableResult) => sum + tableResult.totalCount,
-              0,
-            ),
-          }
+          result = page
+          nextPagination = page.pagination
+          hasMore = page.hasMore
         } else {
           result = await fetchProducts({
             table: activeCategory.table ?? 'musinsa_top_clothes',
@@ -667,12 +658,18 @@ function App() {
             offset,
             limit: PRODUCTS_PER_PAGE,
           })
+          hasMore = result.products.length === PRODUCTS_PER_PAGE &&
+            (result.totalCount === null || offset + result.products.length < result.totalCount)
         }
 
+        // 늦게 도착한 이전 요청이 새 화면을 덮어쓰지 않도록 요청 번호를 확인한다.
         if (requestId === requestIdRef.current) {
+          catalogReadyRef.current = true
+          catalogPaginationRef.current = nextPagination
+          setHasMoreProducts(hasMore)
           setTotalProductCount(result.totalCount)
           setProducts((currentProducts) =>
-            append ? [...currentProducts, ...result.products] : result.products,
+            appendUniqueProducts(append ? currentProducts : [], result.products),
           )
 
           if (!append && (submittedQuery || submittedHadImage)) {
@@ -703,6 +700,8 @@ function App() {
           }
         }
       } finally {
+        if (catalogRequestRef.current === requestId) catalogRequestRef.current = null
+        // 이전 요청의 finally가 새 요청의 로딩 표시까지 끄지 않도록 같은 번호인지 확인한다.
         if (requestId === requestIdRef.current) {
           setIsLoading(false)
         }
@@ -720,15 +719,19 @@ function App() {
     ],
   )
 
+  // 모델 검색 중·완료·실패 화면을 일반 카탈로그 조회로 덮어쓰지 않는다.
   useEffect(() => {
-    if (baselineSearchResponse || submittedHadImage) {
+    if (baselineSearchResponse || submittedQuery || submittedHadImage || isUnderstandingRequest || errorMessage) {
+      // 오류도 여기서 멈춰야 REST 조회가 오류를 지우고 일반 상품을 검색 성공처럼 보여주지 않는다.
       return
     }
 
     requestIdRef.current += 1
     const requestId = requestIdRef.current
+    catalogReadyRef.current = false
 
     const loadTimer = window.setTimeout(() => {
+      // effect 정리 시 아직 시작하지 않은 조회를 취소할 수 있도록 다음 작업으로 예약한다.
       loadProductPage(0, false, requestId)
     }, 0)
 
@@ -737,14 +740,13 @@ function App() {
     activeCategoryId,
     baselineSearchResponse,
     categoryTree,
+    errorMessage,
+    isUnderstandingRequest,
     loadProductPage,
     searchRunId,
     submittedHadImage,
     submittedQuery,
   ])
-
-  const hasMoreProducts =
-    totalProductCount === null || products.length < totalProductCount
 
   useEffect(() => {
     const sentinel = loadMoreRef.current
@@ -759,10 +761,13 @@ function App() {
       return
     }
 
+    // 목록 끝이 가까워지면 다음 카탈로그 페이지를 불러온다.
+    // rootMargin 600px은 화면 끝에 도착하기 조금 전에 다음 페이지를 준비하는 여유 거리다.
+    const requestId = requestIdRef.current
     const observer = new IntersectionObserver(
       ([entry]) => {
         if (entry.isIntersecting) {
-          loadProductPage(products.length, true)
+          loadProductPage(products.length, true, requestId)
         }
       },
       { rootMargin: '600px 0px' },
@@ -782,6 +787,7 @@ function App() {
   useEffect(() => {
     return () => {
       if (selectedImage) {
+        // 파일 미리보기용 브라우저 메모리를 이미지 교체/화면 종료 때 반환한다.
         URL.revokeObjectURL(selectedImage.previewUrl)
       }
     }
@@ -789,6 +795,7 @@ function App() {
 
   useEffect(
     () => () => {
+      // 화면을 떠난 뒤 자동 스크롤이나 완료 알림 타이머가 실행되지 않도록 정리한다.
       if (searchCompleteDelayRef.current) {
         window.clearTimeout(searchCompleteDelayRef.current)
       }
@@ -804,6 +811,7 @@ function App() {
     [],
   )
 
+  // 진행 문구는 타이머로 바뀌는 안내이며, 서버의 실제 단계별 진행률을 받는 것은 아니다.
   useEffect(() => {
     if (!isUnderstandingRequest) {
       return
@@ -820,20 +828,65 @@ function App() {
   }, [isUnderstandingRequest, searchProgressSteps.length])
 
   useEffect(() => {
-    if (!activeModal) {
+    if (!activeModal && !selectedProductForDetail && !isSidebarOpen && !isProviderMenuOpen) {
       return
     }
 
     function handleEscapeKey(event: KeyboardEvent) {
+      // Escape는 열린 UI만 닫는다. 진행 중인 서버 검색을 취소하지는 않는다.
       if (event.key === 'Escape') {
         setActiveModal(null)
+        setSelectedProductForDetail(null)
+        setIsSidebarOpen(false)
+        setIsProviderMenuOpen(false)
       }
     }
 
     window.addEventListener('keydown', handleEscapeKey)
 
     return () => window.removeEventListener('keydown', handleEscapeKey)
-  }, [activeModal])
+  }, [activeModal, selectedProductForDetail, isSidebarOpen, isProviderMenuOpen])
+
+  // 열린 대화상자 안에서 Tab을 순환시키고 닫으면 원래 버튼으로 초점을 돌린다.
+  useEffect(() => {
+    if (!activeDialog) return
+    const dialog = document.querySelector<HTMLElement>(`[data-f1t-dialog="${activeDialog}"]`)
+    if (!dialog) return
+    const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    // 열기 직전 버튼과 body 스크롤 값을 저장해 닫힐 때 복구한다.
+    const previousOverflow = document.body.style.overflow
+    const getFocusableElements = () => Array.from(dialog.querySelectorAll<HTMLElement>(
+      'button:not([disabled]), a[href], input:not([disabled]):not([type="hidden"]), textarea:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])',
+    )).filter((element) => element.tabIndex >= 0 && element.getClientRects().length > 0)
+    const focusFirst = () => (getFocusableElements()[0] ?? dialog).focus()
+
+    function trapTab(event: KeyboardEvent) {
+      // 메뉴가 펼쳐져 버튼 수가 달라질 수 있으므로 Tab을 누를 때마다 목록을 다시 구한다.
+      if (event.key !== 'Tab') return
+      const elements = getFocusableElements()
+      const first = elements[0]
+      const last = elements[elements.length - 1]
+      if (!first) {
+        event.preventDefault()
+        dialog?.focus()
+      } else if (!dialog?.contains(document.activeElement) || (event.shiftKey && document.activeElement === first)) {
+        event.preventDefault()
+        ;(event.shiftKey ? last : first).focus()
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault()
+        first.focus()
+      }
+    }
+
+    document.body.style.overflow = 'hidden'
+    focusFirst()
+    dialog.addEventListener('keydown', trapTab)
+    return () => {
+      dialog.removeEventListener('keydown', trapTab)
+      document.body.style.overflow = previousOverflow
+      if (previousFocus?.isConnected) previousFocus.focus()
+    }
+  }, [activeDialog])
 
   // 카테고리 토글 후 헤더가 화면에서 같은 위치에 오도록 scrollTop 보정
   useLayoutEffect(() => {
@@ -867,6 +920,7 @@ function App() {
   }, [openCategoryIds])
 
   function toggleCategory(groupId: string) {
+    // 펼치기 전 제목 위치를 저장하고, useLayoutEffect가 DOM 변경 뒤 스크롤 차이를 보정한다.
     const headerEl = categoryGroupRefs.current.get(groupId)
 
     if (headerEl) {
@@ -884,8 +938,36 @@ function App() {
     })
   }
 
+  // 화면 전환 때 진행 응답과 완료 알림을 함께 무효화한다. 서버 작업 자체를 중단하지는 않는다.
+  function invalidateActiveRequest() {
+    requestIdRef.current += 1
+    catalogReadyRef.current = false
+    if (searchCompleteDelayRef.current !== null) window.clearTimeout(searchCompleteDelayRef.current)
+    if (searchCompleteHideDelayRef.current !== null) window.clearTimeout(searchCompleteHideDelayRef.current)
+    searchCompleteDelayRef.current = null
+    searchCompleteHideDelayRef.current = null
+    return requestIdRef.current
+  }
+
+  function resetCatalog() {
+    catalogPaginationRef.current = {}
+    setProducts([])
+    setTotalProductCount(null)
+    setHasMoreProducts(false)
+    setIsLoading(false)
+  }
+
   function handleCategorySelect(categoryId: string) {
+    if (categoryId === activeCategoryId && !hasSubmittedSearch && !isUnderstandingRequest && !errorMessage) return
+    // 카테고리 탭은 새 카탈로그 탐색이다. 진행 중인 검색 결과가 다시 덮어쓰지 않게 무효화한다.
+    invalidateActiveRequest()
+    resetCatalog()
     setBaselineSearchResponse(null)
+    setSubmittedQuery('')
+    setSubmittedHadImage(false)
+    setIsUnderstandingRequest(false)
+    setIsSearchCompleteVisible(false)
+    setErrorMessage('')
     setActiveCategoryId(categoryId)
   }
 
@@ -898,9 +980,11 @@ function App() {
   }
 
   function needsReferenceImage(queryText: string) {
+    // 단순한 정규식 검사다. 문장의 실제 의도 분석은 이 뒤의 백엔드가 담당한다.
     return imageReferenceQueryPattern.test(queryText.replace(/\s+/g, ' '))
   }
 
+  // 최근 검색은 현재 React 메모리에 최대 5개 보관하며 새로고침 후에는 유지되지 않는다.
   function saveRecentSearchSnapshot(searchItem: RecentSearchItem) {
     if (!searchItem.query) {
       return
@@ -913,6 +997,8 @@ function App() {
   }
 
   function restoreRecentSearch(searchItem: RecentSearchItem) {
+    // 저장된 응답 스냅샷을 화면에 다시 넣는다. 같은 문장을 서버에 재요청하는 동작은 아니다.
+    // 이미지 사용 여부만 저장하므로 이 동작에서 원본 File까지 되살리지는 않는다.
     setQuery(searchItem.query)
     setErrorMessage('')
 
@@ -921,6 +1007,8 @@ function App() {
       return
     }
 
+    invalidateActiveRequest()
+    setIsLoading(false)
     if (searchItem.categoryId) {
       setActiveCategoryId(searchItem.categoryId)
     }
@@ -949,6 +1037,7 @@ function App() {
   }
 
   function toggleLikedItem(itemId: string) {
+    // Set을 새로 만들어 React가 변경을 감지하게 한다. 관심 상품은 서버에 저장하지 않는다.
     setLikedItemIds((currentIds) => {
       const nextIds = new Set(currentIds)
 
@@ -962,12 +1051,16 @@ function App() {
     })
   }
 
+  // 검색 실행의 중심: 입력 검증 → /search 호출 → 결과 상태 갱신 → 완료/오류 표시.
   async function runSubmittedSearch(
     queryText: string,
     imageFile: File | null,
     requestId: number,
   ) {
     const searchTitle = getSearchTitle(queryText, Boolean(imageFile))
+    // 응답 대기 중의 화면 변화와 무관하게 검색 요청 당시 카테고리를 스냅샷에 남긴다.
+    const searchCategoryId = activeCategoryId
+    const searchCategoryLabel = activeCategory.label
 
     if (!queryText && !imageFile) {
       if (requestId !== requestIdRef.current) {
@@ -1000,6 +1093,7 @@ function App() {
     }
 
     try {
+      // 선택한 카테고리는 서버의 후보 필터로, provider는 설명 생성 모델 선택으로 전달한다.
       const response = await searchBaseline({
         query: queryText,
         image: imageFile,
@@ -1013,12 +1107,14 @@ function App() {
       })
 
       if (requestId !== requestIdRef.current) {
+        // 검색 도중 다른 검색/카테고리 이동으로 번호가 바뀌었다면 도착한 결과를 버린다.
         return
       }
 
       setSubmittedQuery(queryText)
       setSubmittedHadImage(Boolean(imageFile))
       setBaselineSearchResponse(response)
+      // 검색 응답을 저장하면 렌더링이 카탈로그 대신 response.results를 선택한다.
       setProducts([])
       setTotalProductCount(response.results.length)
       setErrorMessage('')
@@ -1028,6 +1124,8 @@ function App() {
         id: `baseline-${Date.now()}`,
         query: searchTitle,
         mode: response.mode,
+        categoryId: searchCategoryId,
+        categoryLabel: searchCategoryLabel,
         submittedHadImage: Boolean(imageFile),
         baselineSearchResponse: response,
       })
@@ -1061,6 +1159,7 @@ function App() {
       setProducts([])
       setTotalProductCount(null)
       const message = error instanceof Error ? error.message : ''
+      // CORS/네트워크 차단의 Failed to fetch는 서버 본문을 읽을 수 없어 일반 연결 오류로 바꾼다.
       setErrorMessage(
         message && !message.toLowerCase().includes('failed to fetch')
           ? message
@@ -1075,25 +1174,25 @@ function App() {
     }
   }
 
+  // 폼 제출 시 입력을 고정하고 요청 번호를 갱신한 뒤 비동기 검색을 시작한다.
   function handleSubmit(event: React.SyntheticEvent<HTMLFormElement>) {
     event.preventDefault()
-
-    if (searchCompleteDelayRef.current) {
-      window.clearTimeout(searchCompleteDelayRef.current)
-    }
-
-    if (searchCompleteHideDelayRef.current) {
-      window.clearTimeout(searchCompleteHideDelayRef.current)
-    }
+    const nextRequestId = invalidateActiveRequest()
 
     setIsSearchCompleteVisible(false)
     setIsUnderstandingRequest(true)
     setSearchProgressIndex(0)
-    const nextRequestId = requestIdRef.current + 1
     const queryText = query.trim()
     const imageFile = selectedImage?.file ?? null
 
-    requestIdRef.current = nextRequestId
+    // 제출 시 이전 카드·오류를 비우고 입력을 고정한다. 타이핑 중에는 검색을 호출하지 않는다.
+    setSubmittedQuery(queryText)
+    setSubmittedHadImage(Boolean(imageFile))
+    setBaselineSearchResponse(null)
+    setProducts([])
+    setTotalProductCount(null)
+    setIsLoading(false)
+    setErrorMessage('')
 
     if (queryText && !imageFile && needsReferenceImage(queryText)) {
       setBaselineSearchResponse(null)
@@ -1107,6 +1206,7 @@ function App() {
     void runSubmittedSearch(queryText, imageFile, nextRequestId)
   }
 
+  // 미리보기 URL은 브라우저에서만 쓰고, 서버에는 원본 File을 전송한다.
   function setImageFile(file: File) {
     setSelectedImage((currentImage) => {
       if (currentImage) {
@@ -1142,6 +1242,7 @@ function App() {
   }
 
   function handleImageDrop(event: React.DragEvent<HTMLDivElement>) {
+    // 기본 파일 열기를 막고 첫 이미지 파일을 입력창 선택과 같은 setImageFile 경로에 넣는다.
     event.preventDefault()
     setIsImageDragging(false)
 
@@ -1174,13 +1275,10 @@ function App() {
   }
 
   function handleHomeClick() {
-    if (searchCompleteDelayRef.current) {
-      window.clearTimeout(searchCompleteDelayRef.current)
-    }
-
-    if (searchCompleteHideDelayRef.current) {
-      window.clearTimeout(searchCompleteHideDelayRef.current)
-    }
+    // 검색 조건을 해제하고 searchRunId를 올려 기본 카탈로그 조회를 요청한다.
+    invalidateActiveRequest()
+    resetCatalog()
+    setErrorMessage('')
 
     setActiveModal(null)
     setIsSidebarOpen(false)
@@ -1196,916 +1294,248 @@ function App() {
   }
 
   function handlePageClick(pageId: NavItemId) {
+    // home은 목록 초기화, about은 소개 대화상자 열기로 분기한다.
     if (pageId === 'home') {
       handleHomeClick()
       return
     }
 
-    if (searchCompleteDelayRef.current) {
-      window.clearTimeout(searchCompleteDelayRef.current)
-    }
-
-    if (searchCompleteHideDelayRef.current) {
-      window.clearTimeout(searchCompleteHideDelayRef.current)
-    }
-
+    // 소개 창은 검색 위에 열리는 UI다. 진행 요청이나 완료 표시 타이머는 그대로 유지한다.
     setActiveModal(pageId)
     setIsSidebarOpen(false)
-    setIsUnderstandingRequest(false)
-    setIsSearchCompleteVisible(false)
   }
 
-  const sidebarLabelClass = `whitespace-nowrap transition duration-200 ${
-    isSidebarOpen
-      ? 'translate-x-0 opacity-100 delay-100'
-      : '-translate-x-2 opacity-0'
-  }`
-  const sidebarDetailClass = `transition duration-200 ${
-    isSidebarOpen
-      ? 'opacity-100 delay-100'
-      : 'pointer-events-none opacity-0'
-  }`
+  // 카탈로그와 검색 응답을 같은 카드 형태로 맞추되, 검색 순위와 이미지 주소는 유지한다.
+  const displayItems = isBaselineSearch
+    ? baselineResults.map((result) => ({
+        product: { ...result, image_url: getBaselineImageUrl(result), _sourceTable: result.source_table as ProductTable | undefined } as Product,
+        imageUrl: getBaselineImageUrl(result),
+        key: `search-${result.source_table ?? 'baseline'}-${result.id}`,
+        rank: result.rank,
+      }))
+    : products.map((product, index) => ({
+        product,
+        imageUrl: getProductImageUrl(product),
+        key: `${product._sourceTable}-${product.id}`,
+        rank: index + 1,
+      }))
 
+  // 아래는 화면 구성: 사이드바 → 입력 폼 → 검색 메타데이터/상품 목록 → 상세창.
   const sidebarContent = (
-    <div className="flex h-full min-h-0 flex-col px-4 py-6">
-      <div
-        className={`shrink-0 pb-5 ${
-          isSidebarOpen ? 'border-b border-slate-200' : ''
-        }`}
-      >
-        <div className="mb-8 flex h-12 items-center justify-between">
-          <button
-            type="button"
-            onClick={() => setIsSidebarOpen((isOpen) => !isOpen)}
-            className={`ml-1 flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border bg-white text-slate-700 shadow-sm transition hover:border-slate-300 hover:bg-slate-50 hover:text-slate-950 ${
-              isSidebarOpen
-                ? 'border-slate-300 ring-2 ring-slate-200'
-                : 'border-slate-200'
-            }`}
-            aria-label={isSidebarOpen ? '사이드바 닫기' : '사이드바 열기'}
-          >
-            <span className="flex w-4 flex-col gap-1">
-              <span className="h-0.5 rounded-full bg-current" />
-              <span className="h-0.5 rounded-full bg-current" />
-              <span className="h-0.5 rounded-full bg-current" />
-            </span>
-          </button>
-
-        </div>
-
-        <div className="space-y-3">
-          <button
-            type="button"
-            onClick={handleHomeClick}
-            className="flex h-12 w-full items-center gap-4 overflow-hidden rounded-xl text-left text-sm font-semibold text-slate-700 transition hover:bg-white hover:text-slate-950 hover:shadow-sm"
-          >
-            <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl text-3xl font-light leading-none text-slate-500 transition group-hover:text-slate-950">
-              +
-            </span>
-            <span className={sidebarLabelClass}>새 검색</span>
-          </button>
-
-        </div>
+    <div className="f1t-drawer-content">
+      <div className="f1t-drawer-heading">
+        <span className="f1t-wordmark">F1T<span>.</span></span>
+        <button type="button" className="f1t-icon-button" onClick={() => setIsSidebarOpen(false)} aria-label="메뉴 닫기">×</button>
       </div>
-
-      <div
-        ref={sidebarScrollRef}
-        className={`min-h-0 flex-1 overflow-y-auto py-5 pr-1 [overflow-anchor:none] ${sidebarDetailClass}`}
-      >
-        <section className="mb-7">
-          <div className="mb-3 flex items-center justify-between">
-            <h2 className="text-sm font-semibold text-slate-950">
-              이전 검색
-            </h2>
-            <span className="text-[11px] font-medium text-slate-400">
-              임시 저장
-            </span>
-          </div>
-
-          <div className="space-y-2">
-            {recentSearches.map((recentSearch) => (
-              <button
-                key={recentSearch.id}
-                type="button"
-                onClick={() => restoreRecentSearch(recentSearch)}
-                className="block w-full rounded-lg border border-transparent bg-white/60 px-3 py-2.5 text-left text-xs leading-5 text-slate-600 transition hover:border-slate-200 hover:bg-white hover:text-slate-950"
-              >
-                <span className="line-clamp-2">{recentSearch.query}</span>
-                {recentSearch.mode && (
-                  <span className="mt-1 block text-[11px] font-medium text-slate-400">
-                    {getSearchModeLabel(
-                      recentSearch.mode,
-                      recentSearch.baselineSearchResponse?.pipeline,
-                      recentSearch.categoryLabel ?? '상품 결과',
-                    )}
-                  </span>
-                )}
-              </button>
-            ))}
-          </div>
+      <button type="button" className="f1t-new-search" onClick={handleHomeClick}>새로운 스타일 찾기 <span aria-hidden="true">↗</span></button>
+      <div ref={sidebarScrollRef} className="f1t-drawer-scroll">
+        <section className="f1t-drawer-section">
+          <div className="f1t-section-eyebrow">최근 검색 <span>이 페이지에서</span></div>
+          {recentSearches.length === 0 ? (
+            <p className="f1t-empty-history">아직 검색한 내용이 없어요.<br />마음에 드는 스타일을 찾아보세요.</p>
+          ) : (
+            <div className="f1t-history-list">
+              {recentSearches.map((item) => (
+                <button key={item.id} type="button" onClick={() => restoreRecentSearch(item)}>
+                  <span>{item.query}</span><span aria-hidden="true">↗</span>
+                </button>
+              ))}
+            </div>
+          )}
         </section>
-
-        <nav className="space-y-2">
-          <div className="mb-3 flex items-center justify-between">
-            <h2 className="text-sm font-semibold text-slate-950">
-              카테고리
-            </h2>
-          </div>
-
-          <button
-            type="button"
-            onClick={() => handleCategorySelect(allCategory.id)}
-            className={`mb-4 flex min-h-10 w-full items-center rounded-lg px-3 text-left text-sm transition ${
-              activeCategoryId === allCategory.id
-                ? 'border border-slate-200 bg-white font-semibold text-slate-950 shadow-sm'
-                : 'border border-transparent text-slate-700 hover:bg-white hover:text-slate-950'
-            }`}
-          >
-            전체
-          </button>
-
-          {categoryTree.map((group) => {
-            const isOpen = openCategoryIds.has(group.id)
-            const isActive = activeCategoryId === group.id
-
-            return (
-              <div
-                key={group.id}
-                ref={(el) => {
-                  if (el) categoryGroupRefs.current.set(group.id, el)
-                  else categoryGroupRefs.current.delete(group.id)
-                }}
-              >
-                <div className="flex items-center gap-1">
-                  <button
-                    type="button"
-                    onClick={() => toggleCategory(group.id)}
-                    className="flex h-9 w-8 items-center justify-center rounded-md text-slate-500 transition hover:bg-white hover:text-slate-950"
-                    aria-label={`${group.label} 메뉴 ${isOpen ? '닫기' : '열기'}`}
-                  >
-                    <span
-                      className={`h-2.5 w-2.5 border-b-2 border-r-2 border-current transition ${
-                        isOpen ? 'rotate-45' : '-rotate-45'
-                      }`}
-                    />
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => handleCategorySelect(group.id)}
-                    className={`flex min-h-9 flex-1 items-center rounded-lg px-3 text-left text-sm transition ${
-                      isActive
-                        ? 'border border-slate-200 bg-white font-semibold text-slate-950 shadow-sm'
-                        : 'border border-transparent text-slate-700 hover:bg-white hover:text-slate-950'
-                    }`}
-                  >
-                    {group.label}
-                  </button>
-                </div>
-
-                {isOpen && (
-                  <div className="mt-1 space-y-1 pb-1 pl-9">
-                    {group.children.length > 0 ? (
-                      group.children.map((child) => {
-                        const childId = `${group.id}-${child.category2}`
-                        const isChildActive = activeCategoryId === childId
-
-                        return (
-                          <button
-                            key={childId}
-                            type="button"
-                            onClick={() => handleCategorySelect(childId)}
-                            className={`block w-full rounded-md px-3 py-2 text-left text-sm transition ${
-                              isChildActive
-                                ? 'bg-white font-medium text-slate-950 shadow-sm'
-                                : 'text-slate-500 hover:bg-white hover:text-slate-950'
-                            }`}
-                          >
-                            {child.category2}
-                          </button>
-                        )
-                      })
-                    ) : (
-                      <p className="px-3 py-2 text-xs text-slate-400">
-                        연결 후 표시됩니다
-                      </p>
-                    )}
-                  </div>
-                )}
+        <section className="f1t-drawer-section">
+          <p className="f1t-section-eyebrow">카테고리</p>
+          <button type="button" className="f1t-category-all" onClick={() => { handleCategorySelect(allCategory.id); setIsSidebarOpen(false) }}>전체 상품</button>
+          {categoryTree.map((group) => (
+            <div key={group.id} ref={(element) => { if (element) categoryGroupRefs.current.set(group.id, element); else categoryGroupRefs.current.delete(group.id) }}>
+              <div className="f1t-drawer-category">
+                <button type="button" onClick={() => { handleCategorySelect(group.id); setIsSidebarOpen(false) }}>{group.label}</button>
+                <button type="button" onClick={() => toggleCategory(group.id)} aria-expanded={openCategoryIds.has(group.id)} aria-label={`${group.label} 세부 카테고리`}><span aria-hidden="true">{openCategoryIds.has(group.id) ? '−' : '+'}</span></button>
               </div>
-            )
-          })}
-        </nav>
-      </div>
-
-      <div
-        className={`shrink-0 pt-4 ${
-          isSidebarOpen ? 'border-t border-slate-200' : ''
-        }`}
-      >
+              {openCategoryIds.has(group.id) && (
+                <div className="f1t-subcategories">
+                  {group.children.length ? group.children.map((child) => (
+                    <button key={child.category2} type="button" onClick={() => { handleCategorySelect(`${group.id}-${child.category2}`); setIsSidebarOpen(false) }}>{child.category2}</button>
+                  )) : <p>세부 카테고리가 없습니다.</p>}
+                </div>
+              )}
+            </div>
+          ))}
+        </section>
       </div>
     </div>
   )
 
   return (
-    <main
-      className={`min-h-screen bg-slate-50 text-slate-950 transition-[padding] duration-300 ${
-        isSidebarOpen ? 'pl-20 lg:pl-[21rem]' : 'pl-20'
-      }`}
-    >
-      <aside
-        className={`fixed inset-y-0 left-0 z-50 overflow-hidden border-r border-slate-200 bg-slate-50 shadow-sm transition-[width,box-shadow] duration-300 ease-out ${
-          isSidebarOpen ? 'w-[21rem] shadow-2xl' : 'w-20'
-        }`}
-      >
-        {sidebarContent}
-      </aside>
+    <main className="f1t-app">
+      <header className="f1t-header">
+        <div className="f1t-header-inner">
+          <button type="button" onClick={handleHomeClick} className="f1t-brand" aria-label="F1T 홈">
+            <span className="f1t-wordmark">F1T<span>.</span></span>
+            <span className="f1t-brand-caption">FASHION INTENTION TRANSLATOR</span>
+          </button>
+          <div className="f1t-header-actions">
+            {pageNavItems.filter((item) => item.id === 'about').map((item) => <button key={item.id} type="button" className="f1t-about-button" onClick={() => handlePageClick(item.id)}>F1T 소개</button>)}
+            <button type="button" className="f1t-menu-button" onClick={() => setIsSidebarOpen(true)} aria-label="최근 검색과 전체 카테고리 열기" aria-expanded={isSidebarOpen}>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16" /></svg>
+            </button>
+          </div>
+        </div>
+      </header>
 
       {isSidebarOpen && (
-        <button
-          type="button"
-          className="fixed inset-y-0 left-[21rem] right-0 z-30 bg-slate-950/15 lg:hidden"
-          aria-label="사이드바 닫기"
-          onClick={() => setIsSidebarOpen(false)}
-        />
+        <div className="f1t-drawer-layer">
+          <button type="button" className="f1t-drawer-backdrop" aria-label="메뉴 닫기" onClick={() => setIsSidebarOpen(false)} />
+          <aside className="f1t-drawer" role="dialog" aria-modal="true" aria-label="최근 검색과 카테고리" data-f1t-dialog="drawer" tabIndex={-1}>{sidebarContent}</aside>
+        </div>
       )}
 
-      <section
-        className="mx-auto min-h-screen w-full max-w-6xl px-8 py-8"
-      >
-        <header className="relative flex h-16 items-center justify-between border-b border-slate-200">
-          <div className="z-10 w-10" />
-
-          <button
-            type="button"
-            onClick={handleHomeClick}
-            className="absolute left-1/2 top-1/2 flex -translate-x-1/2 -translate-y-1/2 flex-col items-center transition hover:text-slate-600"
-            aria-label="홈으로 이동"
-          >
-            <span className="text-4xl font-semibold leading-none tracking-tight">
-              F1T
-            </span>
-            <span className="mt-1 text-xs font-medium leading-none text-slate-500">
-              Fashion Intention Translator
-            </span>
-          </button>
-
-          <nav className="z-10 hidden items-center gap-1 text-sm font-medium md:flex">
-            {pageNavItems.map((item) => (
-              <button
-                key={item.id}
-                type="button"
-                onClick={() => handlePageClick(item.id)}
-                className="rounded-lg px-3 py-2 text-slate-500 transition hover:bg-white/70 hover:text-slate-950"
-              >
-                {item.label}
-              </button>
-            ))}
-          </nav>
-        </header>
-
-        <nav className="mt-3 flex justify-end gap-1 text-sm font-medium md:hidden">
-          {pageNavItems.map((item) => (
-            <button
-              key={item.id}
-              type="button"
-              onClick={() => handlePageClick(item.id)}
-              className="rounded-lg px-3 py-2 text-slate-500 transition hover:bg-white/70 hover:text-slate-950"
-            >
-              {item.label}
-            </button>
-          ))}
-        </nav>
-
-        <div className="pt-8">
-          <section className="min-w-0">
-            <div className="mb-7 max-w-4xl">
-              <h1 className="mb-4 text-3xl font-semibold tracking-tight text-slate-950 md:text-4xl">
-                머릿속 스타일을 그대로 찾아보세요
-              </h1>
-
-              <p className="text-lg leading-8 text-slate-600">
-                <span className="block">
-                  입고 싶은 상황이나 원하는 색, 핏, 패턴을 편하게 말해보세요.
-                </span>
-                <span className="block">
-                  마음에 든 이미지가 있다면 올리고, 바꾸고 싶은 디테일만 말해도
-                  요청에 맞는 아이템을 찾아드립니다.
-                </span>
-              </p>
-            </div>
-
-            <form
-              onSubmit={handleSubmit}
-              className="relative rounded-2xl border border-slate-200 bg-white p-4 shadow-sm"
-            >
-              <div className="grid items-start gap-4 md:grid-cols-[140px_1fr]">
-                <input
-                  ref={imageInputRef}
-                  type="file"
-                  accept="image/*"
-                  className="hidden"
-                  onChange={handleImageChange}
-                />
-
-                <div
-                  role="button"
-                  tabIndex={0}
-                  onClick={() => imageInputRef.current?.click()}
-                  onKeyDown={(event) => {
-                    if (event.key === 'Enter' || event.key === ' ') {
-                      event.preventDefault()
-                      imageInputRef.current?.click()
-                    }
-                  }}
-                  onDragOver={handleImageDragOver}
-                  onDragLeave={handleImageDragLeave}
-                  onDrop={handleImageDrop}
-                  className={`group relative flex aspect-[3/4] w-full cursor-pointer items-center justify-center overflow-hidden rounded-xl border border-dashed text-center text-sm text-slate-500 transition hover:border-slate-400 hover:bg-slate-100 ${selectedImage ? '' : 'px-4 '}${
-                    isImageDragging
-                      ? 'border-slate-500 bg-slate-100 ring-2 ring-slate-200'
-                      : 'border-slate-300 bg-slate-50'
-                  }`}
-                >
-                  {selectedImage ? (
-                    <>
-                      <img
-                        src={selectedImage.previewUrl}
-                        alt="첨부한 이미지 미리보기"
-                        className="h-full w-full object-contain"
-                      />
-
-                      <span className="absolute inset-x-0 bottom-0 bg-slate-950/65 px-2 py-2 text-xs font-medium text-white opacity-0 transition group-hover:opacity-100">
-                        이미지 바꾸기
-                      </span>
-
-                      <button
-                        type="button"
-                        onClick={handleImageRemove}
-                        className="absolute right-2 top-2 flex h-7 w-7 items-center justify-center rounded-full bg-white/90 text-sm font-semibold text-slate-950 shadow-sm transition hover:bg-white"
-                        aria-label="첨부한 이미지 삭제"
-                      >
-                        ×
-                      </button>
-                    </>
-                  ) : (
-                    <div className="flex flex-col items-center gap-2">
-                      <span className="flex h-9 w-9 items-center justify-center rounded-full border border-slate-300 bg-white text-slate-700 transition group-hover:border-slate-400">
-                        <span className="relative h-4 w-4">
-                          <span className="absolute left-1/2 top-0 h-4 w-0.5 -translate-x-1/2 rounded-full bg-current" />
-                          <span className="absolute left-0 top-1/2 h-0.5 w-4 -translate-y-1/2 rounded-full bg-current" />
-                        </span>
-                      </span>
-
-                      <span className="font-medium text-slate-700">
-                        이미지 추가
-                      </span>
-                      <span className="text-[11px] leading-4 text-slate-400">
-                        클릭 또는 드래그
-                      </span>
-                    </div>
-                  )}
+      <div className="f1t-content">
+        <section className="f1t-search-section" aria-labelledby="search-heading">
+          <div className="f1t-search-intro">
+            <p className="f1t-eyebrow"><span /> YOUR NEXT FIND</p>
+            <h1 id="search-heading">찾는 옷을,<br />말해보세요.</h1>
+            <p>색감부터 분위기까지.<br className="f1t-desktop-break" /> 머릿속 스타일을 상품으로 만나보세요.</p>
+          </div>
+          <div className="f1t-search-workspace">
+            <form id="fashion-search" onSubmit={handleSubmit} className={`f1t-search-form ${isImageDragging ? 'is-dragging' : ''}`}>
+              <div className="f1t-search-main">
+                <input ref={imageInputRef} type="file" accept="image/*" hidden onChange={handleImageChange} />
+                <div className="f1t-upload-wrap" onDragOver={handleImageDragOver} onDragLeave={handleImageDragLeave} onDrop={handleImageDrop}>
+                  <button type="button" className={`f1t-upload ${selectedImage ? 'has-image' : ''}`} onClick={() => imageInputRef.current?.click()} aria-label={selectedImage ? '참고 이미지 바꾸기' : '참고 이미지 추가'}>
+                    {selectedImage ? <img src={selectedImage.previewUrl} alt="첨부한 참고 이미지" /> : <>
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.25" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2" /><circle cx="8" cy="8" r="1.5" /><path d="m4 17 5-5 4 4 3-3 5 5" /></svg>
+                      <span>사진 추가</span>
+                    </>}
+                  </button>
+                  {selectedImage && <button type="button" className="f1t-remove-image" onClick={handleImageRemove} aria-label="참고 이미지 삭제">×</button>}
                 </div>
-
-                <div className="flex min-h-[165px] flex-col">
-                  <textarea
-                    value={query}
-                    onChange={(event) => setQuery(event.target.value)}
-                    onKeyDown={(event) => {
-                      if (event.key === 'Enter' && !event.shiftKey) {
-                        event.preventDefault()
-                        if (!isUnderstandingRequest && !isSearchCompleteVisible) {
-                          event.currentTarget.form?.requestSubmit()
-                        }
-                      }
-                    }}
-                    className="min-h-32 flex-1 resize-none rounded-xl border border-slate-200 bg-white p-4 text-base outline-none transition placeholder:text-slate-400 focus:border-slate-400"
-                    placeholder={
-                      '예: 이 이미지와 비슷한 색으로 긴소매 셔츠 찾아줘\n예: 러닝할 때 입기 좋은 가볍고 신축성 있는 바지 추천해줘\n예: 이 원피스 느낌은 유지하고 패턴은 없는 걸로 찾아줘'
-                    }
-                  />
-
-                  <div className="mt-3 flex items-center justify-between">
-                    <p className="text-sm text-slate-500">
-                      찾고 싶은 옷을 편하게 말해주세요.
-                    </p>
-
-                    <div className="relative flex items-center gap-2">
-                      {/* 모델 선택 */}
-                      <div className="relative">
-                        <button
-                          type="button"
-                          onClick={() => setIsProviderMenuOpen((v) => !v)}
-                          className="flex items-center gap-1 text-xs text-slate-500 transition hover:text-slate-800"
-                        >
-                          <span>
-                            {providerModels[selectedProvider] ?? selectedProvider}
-                          </span>
-                          <svg aria-hidden="true" className="h-3 w-3" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24">
-                            <path d="m6 9 6 6 6-6" strokeLinecap="round" strokeLinejoin="round" />
-                          </svg>
-                        </button>
-
-                        {isProviderMenuOpen && (
-                          <div className="absolute bottom-full right-0 mb-1.5 w-44 overflow-hidden rounded-lg border border-slate-200 bg-white shadow-lg">
-                            {(
-                              [
-                                { value: 'gemini' },
-                                { value: 'openai' },
-                                { value: 'qwen' },
-                              ] as const
-                            ).map(({ value }) => (
-                              <button
-                                key={value}
-                                type="button"
-                                onClick={() => {
-                                  setSelectedProvider(value)
-                                  setIsProviderMenuOpen(false)
-                                }}
-                                className="flex w-full items-center justify-between px-3 py-1.5 text-left transition hover:bg-slate-50"
-                              >
-                                <span className={`text-xs ${selectedProvider === value ? 'font-semibold text-slate-950' : 'text-slate-600'}`}>
-                                  {providerModels[value] ?? value}
-                                </span>
-                                {selectedProvider === value && (
-                                  <svg aria-hidden="true" className="h-3 w-3 text-slate-950" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24">
-                                    <path d="m5 13 4 4L19 7" strokeLinecap="round" strokeLinejoin="round" />
-                                  </svg>
-                                )}
-                              </button>
-                            ))}
-                          </div>
-                        )}
-                      </div>
-
-                      <button
-                        type="submit"
-                        disabled={isUnderstandingRequest || isSearchCompleteVisible}
-                        className="rounded-xl bg-slate-950 px-5 py-3 text-sm font-medium text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-slate-400"
-                      >
-                        {isUnderstandingRequest
-                          ? '파악 중'
-                          : isSearchCompleteVisible
-                            ? '완료'
-                            : '검색하기'}
-                      </button>
-                    </div>
-                  </div>
+                <div className="f1t-query-field">
+                  <label htmlFor="fashion-query">어떤 옷을 찾고 있나요?</label>
+                  <textarea id="fashion-query" value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); if (!isUnderstandingRequest && !isSearchCompleteVisible) event.currentTarget.form?.requestSubmit() } }} placeholder="예: 출근할 때 입을 단정한 검은색 셔츠" rows={2} />
                 </div>
               </div>
-
-              {(isUnderstandingRequest || isSearchCompleteVisible) && (
-                <div className="absolute inset-0 overflow-hidden rounded-2xl flex items-center justify-center bg-white/90 px-6 backdrop-blur-sm">
-                  <div className="flex flex-col items-center text-center">
-                    {isSearchCompleteVisible ? (
-                      <div className="mb-4 flex h-8 w-8 items-center justify-center rounded-full bg-slate-950 text-sm font-semibold text-white">
-                        ✓
-                      </div>
-                    ) : (
-                      <div className="mb-4 flex h-8 items-center gap-1.5">
-                        <span className="typing-dot typing-dot-1 h-2 w-2 rounded-full bg-slate-950" />
-                        <span className="typing-dot typing-dot-2 h-2 w-2 rounded-full bg-slate-950" />
-                        <span className="typing-dot typing-dot-3 h-2 w-2 rounded-full bg-slate-950" />
-                      </div>
-                    )}
-                    <p className="text-base font-semibold text-slate-950">
-                      {isSearchCompleteVisible
-                        ? '검색 완료'
-                        : currentSearchProgress.title}
-                    </p>
-                    <p className="mt-2 text-sm leading-6 text-slate-500">
-                      {isSearchCompleteVisible
-                        ? '요청에 맞춰 정리한 결과를 아래에서 확인해보세요.'
-                        : currentSearchProgress.description}
-                    </p>
-                    {!isSearchCompleteVisible && (
-                      <div className="mt-5 flex gap-1.5">
-                        {searchProgressSteps.map((step, index) => (
-                          <span
-                            key={step.title}
-                            className={`h-1.5 w-6 rounded-full transition ${
-                              index <= searchProgressIndex
-                                ? 'bg-slate-950'
-                                : 'bg-slate-200'
-                            }`}
-                          />
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                </div>
-              )}
+              <div className="f1t-search-bottom">
+                <span className="f1t-search-hint">사진을 더하면 원하는 느낌에 더 가까이</span>
+                <button type="submit" className="f1t-search-button" disabled={isUnderstandingRequest || isSearchCompleteVisible}>{isUnderstandingRequest ? '찾고 있어요' : isSearchCompleteVisible ? '검색 완료' : '스타일 찾기'}<span aria-hidden="true">↗</span></button>
+              </div>
             </form>
 
-            <div ref={resultsSectionRef} className="mt-8 scroll-mt-8">
-              <div className="mb-4 flex items-end justify-between gap-4">
-                <div>
-                  <div className="flex flex-wrap items-center gap-2">
-                    <h2 className="text-xl font-semibold">
-                      {hasSubmittedSearch ? '검색 결과' : '전체 상품'}
-                    </h2>
-                    {baselineSearchResponse &&
-                      reasoningBadges.map((badge) => (
-                        <span
-                          key={badge.label}
-                          title={badge.title}
-                          className={`rounded-full border px-2.5 py-1 text-xs font-medium ${getReasoningBadgeClass(
-                            badge.tone,
-                          )}`}
-                        >
-                          {badge.label}
-                        </span>
-                      ))}
-	                  </div>
-                  {submittedQuery ? (
-                    <p className="mt-1 text-sm text-slate-500">
-                      "{submittedQuery}" 검색 결과
-                    </p>
-                  ) : !hasSubmittedSearch ? (
-                    <p className="mt-1 text-sm text-slate-500">
-                      {activeCategory.label === allCategory.label
-                        ? '전체 상품을 둘러보세요.'
-                        : `${activeCategory.label} 상품을 둘러보세요.`}
-                    </p>
-                  ) : submittedHadImage ? (
-                    <p className="mt-1 text-sm text-slate-500">
-                      이미지 기반 검색 결과
-                    </p>
-                  ) : null}
-                </div>
-
-                <span className="text-sm text-slate-500">
-                  {isBaselineSearch
-                    ? `${baselineResults.length.toLocaleString('ko-KR')}개`
-                    : isLoading && products.length > 0
-                    ? '불러오는 중'
-                    : products.length > 0
-                      ? totalProductCount === null
-                        ? `${products.length.toLocaleString('ko-KR')}개`
-                        : `${products.length.toLocaleString(
-                            'ko-KR',
-                          )} / ${totalProductCount.toLocaleString('ko-KR')}개`
-                      : ''}
-                </span>
+            <div className="f1t-search-options">
+              <span>이렇게 찾아보세요</span>
+              <button type="button" onClick={() => setQuery('러닝할 때 입기 좋은 가벼운 바지 추천해줘')}>가벼운 러닝 팬츠</button>
+              <button type="button" onClick={() => setQuery(searchExamples[2].query)}>미니멀한 원피스</button>
+              <button type="button" className="f1t-advanced-toggle" onClick={() => setIsProviderMenuOpen((open) => !open)} aria-expanded={isProviderMenuOpen}>고급 설정 <span aria-hidden="true">{isProviderMenuOpen ? '−' : '+'}</span></button>
+            </div>
+            {isProviderMenuOpen && (
+              <div className="f1t-advanced-panel">
+                {/* 모델 선택 */}
+                <label htmlFor="description-provider">요청 해석 모델</label>
+                <select id="description-provider" value={selectedProvider} onChange={(event) => setSelectedProvider(event.target.value)}>
+                  {['gemini', 'openai', 'qwen'].map((provider) => <option key={provider} value={provider}>{providerModels[provider] ?? provider}</option>)}
+                </select>
               </div>
+            )}
+            {(isUnderstandingRequest || isSearchCompleteVisible) && (
+              <div className="f1t-search-status" role="status" aria-live="polite">
+                <span className={isUnderstandingRequest ? 'f1t-status-dot is-loading' : 'f1t-status-dot'} />
+                <div><strong>{isSearchCompleteVisible ? '검색이 완료됐어요' : currentSearchProgress.title}</strong><p>{isSearchCompleteVisible ? '아래에서 검색 결과를 확인해보세요.' : currentSearchProgress.description}</p></div>
+              </div>
+            )}
+          </div>
+        </section>
 
-              {requestSummaryItems.length > 0 && (
-                <div className="mb-5 rounded-xl border border-slate-200 bg-white px-4 py-3">
-                  <p className="text-lg font-medium text-slate-500">
-                    반영할 조건
-                  </p>
-                  <div className="mt-2 flex flex-wrap gap-2">
-                    {requestSummaryItems.map((item) => (
-                      <span
-                        key={item}
-                        className="rounded-md bg-slate-100 px-2.5 py-1.5 text-lg font-medium text-slate-700"
-                      >
-                        {item}
-                      </span>
-                    ))}
+        <nav className="f1t-category-tabs" aria-label="상품 카테고리">
+          {[allCategory, ...categoryGroups].map((category) => <button key={category.id} type="button" className={activeCategoryId === category.id ? 'is-active' : ''} aria-current={activeCategoryId === category.id ? 'page' : undefined} onClick={() => handleCategorySelect(category.id)}>{category.label}</button>)}
+          <button type="button" className="f1t-all-categories" onClick={() => setIsSidebarOpen(true)}>세부 카테고리 <span aria-hidden="true">+</span></button>
+        </nav>
+
+        <section ref={resultsSectionRef} className="f1t-results" aria-labelledby="results-heading">
+          <div className="f1t-results-heading">
+            <div><p className="f1t-eyebrow">{hasSubmittedSearch ? 'YOUR EDIT' : 'THE COLLECTION'}</p><h2 id="results-heading">{errorMessage && hasSubmittedSearch ? '검색을 완료하지 못했어요' : hasSubmittedSearch ? '당신이 찾던 스타일' : activeCategory.isAll ? '지금, 눈여겨볼 옷' : activeCategory.label}</h2></div>
+            <span className="f1t-result-count">{isBaselineSearch ? `${baselineResults.length.toLocaleString('ko-KR')}개 상품` : totalProductCount !== null ? `${totalProductCount.toLocaleString('ko-KR')}개 상품` : isLoading ? '불러오는 중' : ''}</span>
+          </div>
+
+          {requestSummaryItems.length > 0 && <div className="f1t-request-summary">{requestSummaryItems.map((item) => <span key={item}>{item}</span>)}</div>}
+
+          {isBaselineSearch && (baselineSearchResponse?.recommendation_reason || shouldShowPipelineExtraction || baselineSearchResponse?.target_description) && (
+            <details className="f1t-search-details">
+              <summary>검색 조건과 추천 이유 살펴보기 <span aria-hidden="true">+</span></summary>
+              <div className="f1t-details-body">
+                {baselineSearchResponse?.recommendation_reason && <p className="f1t-recommendation-copy">{baselineSearchResponse.recommendation_reason}</p>}
+                {parsedAttributeItems.length > 0 && <div className="f1t-attribute-list">{parsedAttributeItems.map((item) => <span key={item.key}><b>{item.label}</b> {item.value}</span>)}</div>}
+                <p className="f1t-detail-copy">{getSearchModeLabel(baselineSearchResponse?.mode, baselineSearchResponse?.pipeline)}</p>
+                {pipelineIntentLabel && <p className="f1t-detail-label">{pipelineIntentLabel}</p>}
+                {detailTargetDescription && <p className="f1t-detail-copy">{detailTargetDescription}</p>}
+                {baselineSearchResponse?.target_description && <div className="f1t-description-detail"><span>검색용 설명문</span><p>{baselineSearchResponse.target_description_ko || baselineSearchResponse.target_description}</p><p lang="en">{baselineSearchResponse.target_description}</p></div>}
+                <div className="f1t-model-badges">{reasoningBadges.map((badge) => <span key={badge.label} title={badge.title} className={getReasoningBadgeClass(badge.tone)}>{badge.label}</span>)}</div>
+                {baselineResults.length > 0 && <p className="f1t-detail-copy">유사도 점수 · {baselineResults.map((result) => `${result.rank}위 ${result.similarity.toFixed(3)}`).join(' / ')}</p>}
+              </div>
+            </details>
+          )}
+
+          {errorMessage && !isBaselineSearch && (
+            <div className="f1t-error" role="alert">
+              <strong>{hasSubmittedSearch ? '검색 요청을 처리하지 못했어요.' : '상품을 불러오지 못했어요.'}</strong>
+              <p>{errorMessage}</p>
+              {hasSubmittedSearch ? (
+                <button type="submit" form="fashion-search" disabled={isUnderstandingRequest}>다시 검색 <span aria-hidden="true">↗</span></button>
+              ) : (
+                <button type="button" onClick={() => { setErrorMessage(''); setSearchRunId((currentId) => currentId + 1) }}>다시 시도 <span aria-hidden="true">↗</span></button>
+              )}
+            </div>
+          )}
+
+          {!isBaselineSearch && isLoading && products.length === 0 && <div className="f1t-product-grid" aria-label="상품 불러오는 중">{Array.from({ length: 8 }).map((_, index) => <div className="f1t-product-skeleton" key={index}><div /><span /><span /></div>)}</div>}
+
+          {displayItems.length > 0 && <div className={`f1t-product-grid ${isLoading && !isBaselineSearch ? 'is-refreshing' : ''}`}>
+            {displayItems.map(({ product, imageUrl, key, rank }) => {
+              const thumbnailUrl = isBaselineSearch ? getSupabaseImageThumbnailUrl(imageUrl) : getProductThumbnailUrl(product)
+              const liked = likedItemIds.has(key)
+              return <article className="f1t-product-card" key={key}>
+                <button type="button" className="f1t-product-open" onClick={() => setSelectedProductForDetail(product)} aria-label={`${product.name ?? '상품'} 상세보기`}>
+                  <div className="f1t-product-image">
+                    {imageUrl ? <img src={thumbnailUrl || imageUrl} alt={product.name ?? '상품 이미지'} data-fallback-src={imageUrl} onError={handleImageFallback} loading={rank <= 4 ? 'eager' : 'lazy'} fetchPriority={rank <= 4 ? 'high' : 'low'} decoding="async" /> : <span className="f1t-missing-image">이미지 준비 중</span>}
+                    {isBaselineSearch && <span className="f1t-product-rank">{String(rank).padStart(2, '0')}</span>}
                   </div>
-                </div>
-              )}
-
-              {shouldShowPipelineExtraction && (
-                <div className="mb-5 rounded-lg border border-slate-200 bg-white px-4 py-3.5">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <p className="text-lg font-semibold text-slate-500">
-                      추론된 VLM 검색 속성
-                    </p>
-                    {parsedAttributeItems.length === 0 && pipelineIntentLabel === 'TPO 검색' && (
-                      <span className="rounded-md bg-slate-100 px-2 py-1 text-lg font-medium text-slate-600">
-                        TPO 검색
-                      </span>
-                    )}
+                  <div className="f1t-product-info">
+                    {product.brand && <p className="f1t-product-brand">{product.brand}</p>}
+                    <h3>{product.name ?? product.id}</h3>
+                    {formatPrice(product.price) && <p className="f1t-product-price">{formatPrice(product.price)}</p>}
                   </div>
+                </button>
+                <button type="button" className={`f1t-like ${liked ? 'is-liked' : ''}`} aria-label={liked ? '관심 상품 해제' : '관심 상품 선택'} aria-pressed={liked} onClick={(event) => { event.stopPropagation(); toggleLikedItem(key) }}>
+                  <svg viewBox="0 0 24 24" fill={liked ? 'currentColor' : 'none'} stroke="currentColor" strokeWidth="1.4" aria-hidden="true"><path d="M20.8 4.6a5.5 5.5 0 0 0-7.8 0L12 5.7l-1.1-1.1a5.5 5.5 0 0 0-7.8 7.8L12 21l8.8-8.6a5.5 5.5 0 0 0 0-7.8Z" /></svg>
+                </button>
+              </article>
+            })}
+          </div>}
 
-                  {parsedAttributeItems.length > 0 && (
-                    <div className="mt-3 flex flex-wrap gap-2">
-                      {parsedAttributeItems.map((item) => (
-                        <span
-                          key={item.key}
-                          className="rounded-md border border-slate-200 bg-slate-50 px-2.5 py-1.5 text-lg text-slate-700"
-                        >
-                          <span className="font-medium text-slate-500">
-                            {item.label}
-                          </span>{' '}
-                          {item.value}
-                        </span>
-                      ))}
-                    </div>
-                  )}
+          {!isLoading && !errorMessage && displayItems.length === 0 && !isUnderstandingRequest && <div className="f1t-empty-results"><span aria-hidden="true">↗</span><h3>{hasSubmittedSearch ? '조금 다른 조건으로 찾아볼까요?' : '아직 표시할 상품이 없어요.'}</h3><p>{hasSubmittedSearch ? '조건을 줄이거나 다른 표현으로 검색해보세요.' : '카테고리를 선택하거나 찾는 스타일을 입력해보세요.'}</p></div>}
 
-                </div>
-              )}
+          {!isBaselineSearch && products.length > 0 && <div ref={loadMoreRef} className="f1t-load-more" role="status">{isLoading ? '상품을 더 불러오고 있어요' : hasMoreProducts ? '' : '모든 상품을 살펴봤어요'}</div>}
+        </section>
 
-              {errorMessage && !isBaselineSearch && (
-                <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
-                  {errorMessage}
-                </div>
-              )}
+        <footer className="f1t-footer"><span className="f1t-wordmark">F1T<span>.</span></span><p>취향을 말하면, 스타일이 보입니다.</p><button type="button" onClick={() => handlePageClick('about')}>서비스 소개 ↗</button></footer>
+      </div>
 
-              {isBaselineSearch && baselineSearchResponse?.target_description && (
-                <div className="mb-5 rounded-xl border border-indigo-100 bg-indigo-50/70 px-4 py-3.5">
-                  <div>
-                    <p className="text-lg font-semibold uppercase tracking-wide text-indigo-400">
-                      Target description 원문
-                    </p>
-                    <p className="mt-1.5 break-words text-lg leading-relaxed text-slate-700">
-                      {baselineSearchResponse.target_description}
-                    </p>
-                  </div>
+      {activeModal && <PolicyModal onClose={() => setActiveModal(null)} />}
 
-                  {baselineSearchResponse.target_description_ko && (
-                    <div className="mt-3 border-t border-indigo-100 pt-3">
-                      <p className="text-lg font-semibold uppercase tracking-wide text-indigo-400">
-                        번역
-                      </p>
-                      <p className="mt-1.5 break-words text-lg leading-relaxed text-slate-700">
-                        {baselineSearchResponse.target_description_ko}
-                      </p>
-                    </div>
-                  )}
-
-                  {baselineSearchResponse.recommendation_reason && (
-                    <div className="mt-3 border-t border-indigo-100 pt-3">
-                      <p className="text-lg font-semibold uppercase tracking-wide text-indigo-400">
-                        추천 이유
-                      </p>
-                      <p className="mt-1.5 break-words text-lg leading-relaxed text-slate-700">
-                        {baselineSearchResponse.recommendation_reason}
-                      </p>
-                    </div>
-                  )}
-
-                </div>
-              )}
-
-              {isBaselineSearch && (
-                <div className="grid grid-cols-5 gap-x-2 gap-y-6 sm:gap-x-3 md:gap-x-4 md:gap-y-8">
-                  {baselineResults.map((result) => {
-                    const resultImageUrl = getBaselineImageUrl(result)
-                    const resultThumbnailUrl = resultImageUrl
-                      ? getSupabaseImageThumbnailUrl(resultImageUrl)
-                      : ''
-                    const isPriorityImage = result.rank <= 5
-                    const likedItemId = `search-${result.source_table ?? 'baseline'}-${result.id}`
-                    const resultPrice = formatPrice(result.price)
-
-                    return (
-                      <article
-                        key={`${result.source_table ?? 'baseline'}-${result.id}-${result.rank}`}
-                        className="min-w-0 cursor-pointer"
-                        onClick={() => setSelectedProductForDetail(result as unknown as Product)}
-                      >
-                        <div className="relative aspect-[3/4] overflow-hidden bg-slate-100">
-                          {resultImageUrl ? (
-                            <img
-                              src={resultThumbnailUrl || resultImageUrl}
-                              alt={result.name ?? `검색 결과 ${result.rank}`}
-                              className="h-full w-full object-cover"
-                              data-fallback-src={resultImageUrl}
-                              decoding="async"
-                              fetchPriority={isPriorityImage ? 'high' : 'low'}
-                              loading={isPriorityImage ? 'eager' : 'lazy'}
-                              onError={handleImageFallback}
-                            />
-                          ) : (
-                            <div className="flex h-full w-full items-center justify-center px-4 text-center text-xs text-slate-400">
-                              이미지 없음
-                            </div>
-                          )}
-                        <button
-                          type="button"
-                          onClick={() => toggleLikedItem(likedItemId)}
-                          className={`absolute right-2 top-2 flex h-8 w-8 items-center justify-center rounded-full bg-white/90 text-base shadow-sm transition hover:bg-white ${
-                            likedItemIds.has(likedItemId)
-                              ? 'text-rose-500'
-                              : 'text-slate-400'
-                          }`}
-                          aria-label={
-                            likedItemIds.has(likedItemId)
-                              ? '관심 상품 해제'
-                              : '관심 상품 선택'
-                          }
-                        >
-                          ♥
-                        </button>
-                      </div>
-
-                      <div className="mt-3">
-                        <h3 className="line-clamp-2 min-h-8 text-[10px] font-medium leading-4 sm:text-xs md:min-h-10 md:text-sm md:leading-5">
-                          {result.name ?? result.id}
-                        </h3>
-                        {resultPrice && (
-                          <p className="mt-1 text-[10px] font-semibold text-slate-950 sm:text-xs md:text-sm">
-                            {resultPrice}
-                          </p>
-                        )}
-                        <p className="mt-1 text-[10px] text-slate-500 sm:text-xs">
-                          similarity {result.similarity.toFixed(4)}
-                        </p>
-                      </div>
-                    </article>
-                    )
-                  })}
-                </div>
-              )}
-
-              {!isBaselineSearch && isLoading && products.length === 0 && (
-                <div className="grid grid-cols-5 gap-x-2 gap-y-6 sm:gap-x-3 md:gap-x-4 md:gap-y-8">
-                  {Array.from({ length: 20 }).map((_, i) => (
-                    <div key={i} className="min-w-0 animate-pulse">
-                      <div className="aspect-[3/4] rounded bg-slate-200" />
-                      <div className="mt-3 space-y-2">
-                        <div className="h-3 rounded bg-slate-200" />
-                        <div className="h-3 w-2/3 rounded bg-slate-200" />
-                        <div className="h-3 w-1/3 rounded bg-slate-200" />
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-
-              {!isBaselineSearch && !isLoading && !errorMessage && products.length === 0 && (
-                <div className="rounded-xl border border-slate-200 bg-white px-4 py-10 text-center text-sm text-slate-500">
-                  조건에 맞는 상품이 없습니다.
-                </div>
-              )}
-
-              {!isBaselineSearch && products.length > 0 && (
-                <>
-                  <div
-                    className={`grid grid-cols-5 gap-x-2 gap-y-6 transition-opacity sm:gap-x-3 md:gap-x-4 md:gap-y-8 ${
-                      isLoading ? 'opacity-60' : 'opacity-100'
-                    }`}
-                  >
-                    {products.map((product, index) => {
-                      const productImageUrl = getProductImageUrl(product)
-                      const productThumbnailUrl = getProductThumbnailUrl(product)
-                      const isPriorityImage = index < 10
-
-                      return (
-                        <article
-                          key={`${product._sourceTable}-${product.id}`}
-                          className="min-w-0 cursor-pointer"
-                          onClick={() => setSelectedProductForDetail(product)}
-                        >
-                          <div className="relative aspect-[3/4] overflow-hidden bg-slate-100">
-                            <img
-                              src={productThumbnailUrl || productImageUrl}
-                              alt={product.name ?? '상품 이미지'}
-                              className="h-full w-full object-cover"
-                              data-fallback-src={productImageUrl || undefined}
-                              decoding="async"
-                              fetchPriority={isPriorityImage ? 'high' : 'low'}
-                              loading={isPriorityImage ? 'eager' : 'lazy'}
-                              onError={handleImageFallback}
-                            />
-                            <button
-                              type="button"
-                              onClick={() =>
-                                toggleLikedItem(`${product._sourceTable}-${product.id}`)
-                              }
-                              className={`absolute right-2 top-2 flex h-8 w-8 items-center justify-center rounded-full bg-white/90 text-base shadow-sm transition hover:bg-white ${
-                                likedItemIds.has(
-                                  `${product._sourceTable}-${product.id}`,
-                                )
-                                  ? 'text-rose-500'
-                                  : 'text-slate-400'
-                              }`}
-                              aria-label={
-                                likedItemIds.has(
-                                  `${product._sourceTable}-${product.id}`,
-                                )
-                                  ? '관심 상품 해제'
-                                  : '관심 상품 선택'
-                              }
-                            >
-                              ♥
-                            </button>
-                          </div>
-
-                          <div className="mt-3">
-                            <h3 className="line-clamp-2 min-h-8 text-[10px] font-medium leading-4 sm:text-xs md:min-h-10 md:text-sm md:leading-5">
-                              {product.name || product.id}
-                            </h3>
-
-                            {formatPrice(product.price) && (
-                              <p className="mt-1 text-[10px] font-semibold sm:text-xs md:text-sm">
-                                {formatPrice(product.price)}
-                              </p>
-                            )}
-                          </div>
-                        </article>
-                      )
-                    })}
-                  </div>
-
-                  <div
-                    ref={loadMoreRef}
-                    className="flex min-h-20 items-center justify-center py-8 text-sm text-slate-500"
-                  >
-                    {isLoading
-                      ? '상품을 더 불러오는 중입니다.'
-                      : hasMoreProducts
-                        ? ''
-                        : '마지막 상품까지 모두 불러왔습니다.'}
-                  </div>
-                </>
-              )}
-
+      {selectedProductForDetail && (
+        <div className="f1t-product-modal-backdrop" onClick={() => setSelectedProductForDetail(null)}>
+          <section className="f1t-product-modal" role="dialog" aria-modal="true" aria-labelledby="product-detail-title" data-f1t-dialog="product" tabIndex={-1} onClick={(event) => event.stopPropagation()}>
+            <button type="button" className="f1t-modal-close" onClick={() => setSelectedProductForDetail(null)} aria-label="상품 상세 닫기">×</button>
+            <div className="f1t-modal-image"><img src={getProductImageUrl(selectedProductForDetail)} alt={selectedProductForDetail.name ?? '상품 이미지'} /></div>
+            <div className="f1t-modal-info">
+              {selectedProductForDetail.brand && <p className="f1t-eyebrow">{selectedProductForDetail.brand}</p>}
+              <h2 id="product-detail-title">{selectedProductForDetail.name ?? selectedProductForDetail.id}</h2>
+              {formatPrice(selectedProductForDetail.price) && <p className="f1t-modal-price">{formatPrice(selectedProductForDetail.price)}</p>}
+              <dl>{[['카테고리', selectedProductForDetail.category2 || selectedProductForDetail.category1], ['색상', selectedProductForDetail.color], ['소매', selectedProductForDetail.sleeve], ['기장', selectedProductForDetail.length], ['핏', selectedProductForDetail.fit], ['소재', selectedProductForDetail.fabric]].filter(([, value]) => value).map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}</dl>
+              <a className="f1t-product-link" href={`https://www.musinsa.com/products/${selectedProductForDetail.id}`} target="_blank" rel="noopener noreferrer">상품 보러 가기 <span aria-hidden="true">↗</span></a>
             </div>
           </section>
         </div>
-
-        {activeModal && (
-          <PolicyModal
-            onClose={() => setActiveModal(null)}
-          />
-        )}
-
-        {selectedProductForDetail && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
-            <div className="max-h-[90vh] w-full max-w-4xl overflow-y-auto rounded-xl bg-white">
-              <div className="sticky top-0 flex items-center justify-between border-b border-slate-200 bg-white px-6 py-4">
-                <h2 className="text-xl font-semibold">{selectedProductForDetail.name}</h2>
-                <button
-                  type="button"
-                  onClick={() => setSelectedProductForDetail(null)}
-                  className="text-slate-500 hover:text-slate-700"
-                  aria-label="닫기"
-                >
-                  ✕
-                </button>
-              </div>
-
-              <div className="flex flex-col gap-6 p-6 md:flex-row">
-                <div className="flex-1">
-                  <div className="space-y-4">
-                    <div>
-                      <p className="text-sm text-slate-500">브랜드</p>
-                      <p className="text-lg font-medium">{selectedProductForDetail.brand || '-'}</p>
-                    </div>
-
-                    <div>
-                      <p className="text-sm text-slate-500">가격</p>
-                      <p className="text-lg font-semibold">
-                        {formatPrice(selectedProductForDetail.price) || '-'}
-                      </p>
-                    </div>
-
-                    <div>
-                      <p className="text-sm text-slate-500">카테고리</p>
-                      <p className="text-base">{selectedProductForDetail.category1 || '-'}</p>
-                    </div>
-
-                    {selectedProductForDetail.sleeve && (
-                      <div>
-                        <p className="text-sm text-slate-500">소매</p>
-                        <p className="text-base">{selectedProductForDetail.sleeve}</p>
-                      </div>
-                    )}
-
-                    {selectedProductForDetail.color && (
-                      <div>
-                        <p className="text-sm text-slate-500">색상</p>
-                        <p className="text-base">{selectedProductForDetail.color}</p>
-                      </div>
-                    )}
-
-                    {selectedProductForDetail.fit && (
-                      <div>
-                        <p className="text-sm text-slate-500">핏</p>
-                        <p className="text-base">{selectedProductForDetail.fit}</p>
-                      </div>
-                    )}
-
-                    <div className="border-t border-slate-200 pt-4">
-                      <a
-                        href={`https://www.musinsa.com/products/${selectedProductForDetail.id}`}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="inline-block rounded-lg bg-slate-950 px-6 py-2 text-white transition hover:bg-slate-800"
-                      >
-                        상품 페이지 보기
-                    </a>
-                    </div>
-                  </div>
-                </div>
-
-                <div className="flex-1">
-                  <img
-                    src={getProductImageUrl(selectedProductForDetail)}
-                    alt={selectedProductForDetail.name ?? '상품 이미지'}
-                    className="aspect-[3/4] w-full rounded-lg object-cover"
-                  />
-                </div>
-              </div>
-            </div>
-          </div>
-        )}
-      </section>
+      )}
     </main>
   )
 }

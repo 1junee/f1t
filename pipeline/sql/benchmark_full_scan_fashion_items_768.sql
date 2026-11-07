@@ -1,6 +1,7 @@
 -- Benchmark-only exhaustive baseline for retrieval latency experiments.
 -- Apply to a non-production benchmark database. The function disables index and
 -- bitmap scans transaction-locally so all stored image embeddings are compared.
+-- 입력은 질의 벡터와 반환 개수, 출력은 상품·유사도·전체 비교 개수다. 운영 검색용 함수와 구분한다.
 
 create or replace function public.benchmark_full_scan_fashion_items_768(
   p_query_embedding extensions.vector,
@@ -34,12 +35,14 @@ set search_path = public, extensions
 set statement_timeout = '60s'
 as $function$
 begin
+  -- 이 벤치마크 호출의 트랜잭션에서만 인덱스 사용을 끄고 전수 비교한다.
   perform set_config('enable_indexscan', 'off', true);
   perform set_config('enable_indexonlyscan', 'off', true);
   perform set_config('enable_bitmapscan', 'off', true);
 
   return query
   with products as materialized (
+    -- 세 테이블의 이미지 벡터를 하나의 중간 결과로 모은다. 이 기준선에는 속성 필터가 없다.
     select
       t.id::text,
       'musinsa_top_clothes'::text as source_table,
@@ -110,11 +113,13 @@ begin
     from public.musinsa_skirt_dress t
     where t.gemini_image_embedding_768 is not null
   ),
+  -- 이미지 유사도만 비교하는 기준선이다. 운영 검색의 소재 가중 점수는 포함하지 않는다.
   scored as (
     select
       products.*,
       (1 - (products.image_embedding <=> p_query_embedding))::double precision
         as similarity,
+      -- LIMIT 적용 전 전체 비교 상품 수를 각 결과 행에 함께 싣는다.
       count(*) over () as candidate_count
     from products
   )
@@ -140,6 +145,7 @@ begin
     scored.candidate_count
   from scored
   order by scored.similarity desc
+  -- 점수를 매긴 뒤 반환 개수만 줄인다. 따라서 LIMIT이 비교한 전체 상품 수를 줄이지는 않는다.
   limit least(greatest(coalesce(p_match_count, 10), 1), 100);
 end;
 $function$;

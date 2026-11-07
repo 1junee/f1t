@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from typing import Any, Iterable
 
 
+# 검색 조건 정리 → DB 후보 조회 → 검색 결과 후처리를 담당한다.
+# VLM 호출과 벡터 점수 계산은 각각 intent 모듈과 recommendation_service에 있다.
 VALID_TABLES = {
     "musinsa_pants",
     "musinsa_top_clothes",
@@ -45,6 +47,7 @@ DB_TRANSLATION_MAP = {
 ARRAY_COLUMNS = ["sex", "fit", "stretch", "thickness", "season"]
 TEXT_COLUMNS = ["sleeve", "length"]
 
+# 값이 명확한 속성만 필터로 쓰고, 색상·소재는 이 목록에서 제외한다.
 EXACT_FILTER_FIELDS = (
     "sleeve",
     "length",
@@ -55,11 +58,14 @@ EXACT_FILTER_FIELDS = (
     "thickness",
     "fit",
 )
+# 문자열 일치 보너스는 현재 비활성화돼 있다. 소재 벡터 점수는 별도 경로에서 계산한다.
 SOFT_TEXT_RERANK_FIELDS = ()
 INTENT_EXTRACTION_STATUS = "gemini_intent_analysis"
+# REST로 가져올 최대 후보 수이며, HNSW 내부 탐색 개수를 뜻하지 않는다.
 METADATA_PREFETCH_LIMIT = 1000
 SUPABASE_REST_TIMEOUT_SECONDS = 8
 
+# 여러 종류가 언급되면 아래 규칙 순서에서 처음 찾은 카테고리 하나를 선택한다.
 CATEGORY_RULES = (
     ("one-piece", "musinsa_skirt_dress", "원피스", ("원피스", "드레스", "one piece", "one-piece")),
     ("skirt", "musinsa_skirt_dress", "스커트", ("스커트", "치마", "skirt")),
@@ -178,6 +184,7 @@ DB_EXACT_MATCH_VARIANTS = {
         "winter": ("겨울",),
     },
 }
+# 후처리에서는 사용자 표현과 DB 한글 표기를 같은 속성의 동의어로 비교한다.
 for field, values in DB_EXACT_MATCH_VARIANTS.items():
     for value, variants in values.items():
         VALUE_VARIANTS.setdefault(field, {})[value] = (
@@ -218,6 +225,7 @@ DETAIL_DESCRIPTION_LABELS = {
 
 @dataclass(frozen=True)
 class ParsedTextAttributes:
+    # None은 조건을 찾지 못했다는 뜻이며, 해당 속성을 임의로 제한하지 않는다.
     sleeve: str | None = None
     length: str | None = None
     color: str | None = None
@@ -230,6 +238,7 @@ class ParsedTextAttributes:
     fabric: str | None = None
 
     def to_dict(self) -> dict[str, str]:
+        # 비어 있는 필드는 제외해 필터에 실제 요청 조건만 전달한다.
         return {
             key: value
             for key, value in self.__dict__.items()
@@ -237,6 +246,7 @@ class ParsedTextAttributes:
         }
 
     def with_missing_from(self, fallback: "ParsedTextAttributes") -> "ParsedTextAttributes":
+        # VLM이 비운 값은 키워드 파서로 채운다. 명시된 wide 핏은 예외적으로 우선한다.
         return ParsedTextAttributes(
             **{
                 field: (
@@ -251,6 +261,7 @@ class ParsedTextAttributes:
 
 @dataclass(frozen=True)
 class ParallelTextAnalysis:
+    # 검색용 속성과 설명문에 보탤 디테일을 따로 보관하는 분석 결과다.
     structured_attributes: ParsedTextAttributes
     detail_terms: str | None
     detail_target_description: str | None
@@ -264,6 +275,7 @@ class ParallelTextAnalysis:
 
 @dataclass(frozen=True)
 class AttributeTextSearchPlan:
+    # 검색 계획을 담는 자료형이다. 이 객체를 만드는 것만으로 DB를 조회하지 않는다.
     parsed_attributes: ParsedTextAttributes
     has_image: bool
     table_filter: str | None
@@ -277,6 +289,7 @@ class AttributeTextSearchPlan:
     extraction_metadata: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
+        # 응답에서 검색 과정을 설명하기 위한 메타데이터이며 검색 실행 함수는 아니다.
         exact_fields = [
             field
             for field in EXACT_FILTER_FIELDS
@@ -336,7 +349,7 @@ class AttributeTextSearchPlan:
                 "category1 is used to narrow the Supabase table before vector search only when explicit or conservatively extracted.",
                 "The API fetches a wider candidate set for metadata mode before post-filter/rerank.",
                 "Exact attributes are post-filtered/reranked only when returned by the RPC.",
-                "color and fabric are not separately embedded; they stay as soft text signals.",
+                "Color stays in the target description; an explicit fabric attribute is embedded separately for weighted similarity.",
                 "Detail terms are handled by the target-description generation path, not as database columns.",
                 "Abstract TPO queries are marked but not hard-filtered unless explicit attributes are present.",
             ],
@@ -344,10 +357,12 @@ class AttributeTextSearchPlan:
 
 
 def parse_text_attributes(query: str) -> ParsedTextAttributes:
+    # 기존 호출부에는 분석 전체 대신 구조화된 속성만 돌려준다.
     return analyze_text_query_in_parallel(query).parsed_attributes
 
 
 def analyze_text_query_in_parallel(query: str) -> ParallelTextAnalysis:
+    # 여기서는 외부 모델을 호출하지 않고, 속성 키워드와 시각 디테일을 나눠 읽는다.
     normalized = _normalize_query(query)
     with ThreadPoolExecutor(max_workers=2) as executor:
         structured_future = executor.submit(_parse_structured_attributes, normalized)
@@ -356,6 +371,7 @@ def analyze_text_query_in_parallel(query: str) -> ParallelTextAnalysis:
         detail_terms, detail_target_description = detail_future.result()
 
     intent_type = _detect_intent_type(normalized, structured_attributes)
+    # 두 작업이 끝난 뒤 결과를 합친다. 이 스레드 병렬화는 외부 모델 호출과 별개다.
     structured_fields = structured_attributes.to_dict()
     lane_metadata = {
         "structured_attributes": {
@@ -401,19 +417,17 @@ def build_attribute_text_search_plan(
     category2_filter: str | None = None,
     category2_keyword_filter: str | None = None,
 ) -> AttributeTextSearchPlan:
+    # 성공한 VLM 결과는 빈 속성까지 존중한다. 규칙으로 제외된 조건을 되살리지 않는다.
     analysis = analyze_text_query_in_parallel(query)
     parsed = (
-        extracted_attributes.with_missing_from(analysis.parsed_attributes)
-        if extracted_attributes
+        extracted_attributes
+        if extracted_attributes is not None
+        and (extraction_metadata or {}).get("status", "ok") == "ok"
         else analysis.parsed_attributes
     )
-    rule_category, rule_table, rule_category2_keyword = _parse_category(
-        _normalize_query(query)
-    )
-    category = parsed.category1 or rule_category
+    # 실패·미사용 시의 규칙 결과도 parsed에 들어 있으므로 여기서 다시 원문을 해석하지 않는다.
+    category = parsed.category1
     inferred_table, inferred_category2_keyword = _route_category(category)
-    inferred_table = inferred_table or rule_table
-    inferred_category2_keyword = inferred_category2_keyword or rule_category2_keyword
     user_overrides = {
         key: value
         for key, value in {
@@ -424,14 +438,16 @@ def build_attribute_text_search_plan(
         if value
     }
 
+    # 화면에서 선택한 카테고리처럼 요청에 직접 전달된 필터를 추론값보다 우선한다.
     effective_table = table_filter or inferred_table
     if effective_table not in VALID_TABLES:
         effective_table = table_filter
 
-    effective_category2_keyword = (
-        category2_keyword_filter
-        or inferred_category2_keyword
-    )
+    # 명시적으로 범위를 선택했다면 원문의 추론 키워드로 다시 좁히지 않는다.
+    effective_category2_keyword = category2_keyword_filter
+    if effective_category2_keyword is None and table_filter is None and category2_filter is None:
+        effective_category2_keyword = inferred_category2_keyword
+    # 후처리할 여유 후보를 요청한다. 실제 RPC 반환 수에는 SQL의 별도 상한이 있다.
     has_parsed_attributes = bool(parsed.to_dict() or category)
     if has_parsed_attributes:
         prefetch_count = max(top_k, METADATA_PREFETCH_LIMIT)
@@ -456,6 +472,7 @@ def build_attribute_text_search_plan(
 
 
 def _route_category(category: str | None) -> tuple[str | None, str | None]:
+    # 스커트와 원피스는 같은 테이블을 쓰므로 구분용 키워드도 함께 반환한다.
     if not category:
         return None, None
     table = TABLE_ROUTING_MAP.get(category)
@@ -475,6 +492,7 @@ def get_target_table(category1: str | None) -> str | None:
 
 
 def _normalize_query(text: str) -> str:
+    # 한글 조합 방식과 영문 대소문자 차이가 키워드 탐지에 영향을 주지 않게 맞춘다.
     return f" {unicodedata.normalize('NFC', text.lower())} "
 
 
@@ -486,6 +504,7 @@ def _parse_category(normalized: str) -> tuple[str | None, str | None, str | None
 
 
 def _parse_structured_attributes(normalized: str) -> ParsedTextAttributes:
+    # 문맥을 추론하는 모델이 아니라, 미리 정의된 단어·패턴을 찾는 보완 파서다.
     values: dict[str, str | None] = {
         "category1": _parse_category(normalized)[0],
         "color": _first_term(normalized, COLOR_TERMS),
@@ -499,9 +518,11 @@ def _parse_structured_attributes(normalized: str) -> ParsedTextAttributes:
 
 
 def _parse_detail_description(normalized: str) -> tuple[str | None, str | None]:
+    # 한국어 디테일을 사전의 영어 표현으로 바꿔 설명문 생성에 보탤 문장을 만든다.
     terms = _matched_terms(normalized, DETAIL_DESCRIPTION_TERMS)
     display_terms = ", ".join(dict.fromkeys(terms)) or None
     canonical_terms = ", ".join(
+        # 같은 뜻의 표현이 여러 번 나와도 처음 등장한 순서대로 한 번만 넣는다.
         dict.fromkeys(DETAIL_DESCRIPTION_LABELS.get(term, term) for term in terms)
     )
     target_description = (
@@ -516,6 +537,7 @@ def _detect_intent_type(
     normalized: str,
     structured_attributes: ParsedTextAttributes,
 ) -> str:
+    # '면접' 같은 상황 표현을 분류할 뿐, 계절·두께 등의 필터를 새로 추론하지 않는다.
     if not _contains_any(normalized, ABSTRACT_TPO_TERMS):
         return "attribute"
     if structured_attributes.category1:
@@ -527,6 +549,7 @@ def _first_pattern_value(
     normalized: str,
     patterns: Iterable[tuple[str, tuple[str, ...]]],
 ) -> str | None:
+    # 문장 속 등장 순서가 아니라 패턴 목록의 순서가 우선순위를 결정한다.
     for value, terms in patterns:
         if _contains_any(normalized, terms):
             return value
@@ -558,6 +581,7 @@ def _contains_term(normalized: str, term: str) -> bool:
     if not term:
         return False
     if re.search(r"[a-z0-9]", term):
+        # 영문은 단어 경계를 확인해 'male'이 'female' 안에서 잘못 매칭되지 않게 한다.
         return bool(re.search(rf"(?<![a-z0-9]){re.escape(term)}(?![a-z0-9])", normalized))
     return term in normalized
 
@@ -568,6 +592,7 @@ def _row_has_value(row: dict[str, Any], field: str) -> bool:
 
 
 def _row_matches_attribute(row: dict[str, Any], field: str, value: str) -> bool:
+    # DB 필터와 달리, 여기서는 정규화한 상품 문자열에 동의어가 포함되는지 검사한다.
     row_text = _normalize_row_value(row.get(field))
     if not row_text:
         return False
@@ -577,6 +602,7 @@ def _row_matches_attribute(row: dict[str, Any], field: str, value: str) -> bool:
 
 
 def _exact_match_count(row: dict[str, Any], parsed: ParsedTextAttributes) -> int:
+    # 카테고리는 검색 범위를 정할 때 쓰므로 상품별 일치 보너스에서는 제외한다.
     return sum(
         1
         for field in EXACT_FILTER_FIELDS
@@ -604,6 +630,7 @@ def _split_semantic_terms(value: str) -> list[str]:
 
 
 def _normalize_row_value(value: Any) -> str:
+    # DB 배열과 문자열을 같은 방식으로 비교할 수 있도록 소문자 한 줄로 맞춘다.
     if isinstance(value, list):
         value = " ".join(str(item) for item in value)
     return re.sub(r"\s+", " ", str(value or "").lower()).strip()
@@ -614,12 +641,14 @@ def refine_attribute_text_results(
     parsed: ParsedTextAttributes,
     top_k: int,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    # 반환 행에 실제로 존재하는 속성만 재검사한다. 없는 컬럼 때문에 전부 탈락시키지 않는다.
     exact_fields = [
         field
         for field in EXACT_FILTER_FIELDS
         if field != "category1" and getattr(parsed, field) is not None
     ]
     supported_exact_fields = [
+        # 한 행이라도 값이 있으면 지원 필드다. 다른 행의 누락값은 불일치로 처리된다.
         field for field in exact_fields if any(_row_has_value(row, field) for row in rows)
     ]
     unsupported_exact_fields = [
@@ -633,9 +662,11 @@ def refine_attribute_text_results(
             for field in supported_exact_fields
         )
     ]
+    # 모든 후보가 탈락하면 원래 후보를 유지하고, 응답 메타데이터에 조건 완화를 기록한다.
     used_exact_filter = bool(supported_exact_fields and filtered_rows)
     working_rows = filtered_rows if used_exact_filter else rows
 
+    # 정렬 때만 속성 일치 보너스를 더한다. 행의 similarity 값 자체는 바꾸지 않는다.
     reranked_rows = sorted(
         working_rows,
         key=lambda row: (
@@ -672,6 +703,7 @@ def refine_attribute_text_results(
 
 def translate_to_db_value(key: str, value: Any) -> Any:
     """영어 속성값을 DB 저장값(한글)으로 변환."""
+    # 예: wide 하나가 DB의 루즈·오버사이즈 두 값으로 확장될 수 있다.
     if key not in DB_TRANSLATION_MAP:
         return value
     mapping = DB_TRANSLATION_MAP[key]
@@ -690,6 +722,10 @@ def retrieve_candidates(
     include_embeddings: bool = False,
     page_size: int = 100,
     max_rows: int = METADATA_PREFETCH_LIMIT,
+    *,
+    table_filter: str | None = None,
+    category2_filter: str | None = None,
+    category2_keyword_filter: str | None = None,
 ) -> list[dict[str, Any]]:
     """
     VLM 추론 결과(속성 dict)를 받아 Supabase SQL 필터링으로 후보군 반환.
@@ -717,19 +753,31 @@ def retrieve_candidates(
         options=ClientOptions(postgrest_client_timeout=timeout_seconds),
     )
 
+    # 검색 계획의 테이블을 우선한다. 범위가 없으면 호출자가 전체 테이블 RPC로 이어간다.
     category1 = (inferred_attributes.get("category1") or "").lower()
-    target_table = TABLE_ROUTING_MAP.get(category1)
+    target_table = table_filter or TABLE_ROUTING_MAP.get(category1)
     if not target_table:
         return []
+    if target_table not in VALID_TABLES:
+        raise ValueError("Invalid table_filter.")
 
+    # 현재는 모든 컬럼을 내려받는다. 임베딩 제외 옵션도 조회 이후에 제거하는 방식이다.
     select_fields = "*"
     rows: list[dict[str, Any]] = []
     offset = 0
+    # 한 번에 모두 전송하지 않고 페이지로 읽되, 기본 1,000개에서 멈춘다.
     while True:
         page_end = min(offset + page_size - 1, max_rows - 1)
+        # range의 마지막 위치도 포함되므로 페이지 끝에서 1을 뺀다.
         db_query = supabase.table(target_table).select(select_fields)
+        # RPC와 동일하게 세부 분류는 정확 일치와 대소문자 무시 부분 일치를 함께 적용한다.
+        if category2_filter is not None:
+            db_query = db_query.eq("category2", category2_filter)
+        if category2_keyword_filter is not None:
+            db_query = db_query.ilike("category2", f"%{category2_keyword_filter}%")
         db_query = _apply_candidate_filters(db_query, inferred_attributes)
-        response = db_query.range(offset, page_end).execute()
+        # 페이지마다 같은 순서를 유지해 중복·누락 가능성을 줄인다.
+        response = db_query.order("id").range(offset, page_end).execute()
         page = response.data or []
         normalized_page = [
             _normalize_candidate_row(row, target_table, supabase_url)
@@ -755,6 +803,8 @@ def retrieve_products(inferred_attributes: dict[str, Any]) -> list[dict[str, Any
 
 
 def _apply_candidate_filters(db_query: Any, inferred_attributes: dict[str, Any]) -> Any:
+    # 여기서는 쿼리 객체에 조건만 붙인다. 실제 요청은 retrieve_candidates의 execute다.
+    # 색상·소재는 SQL 완전 일치 조건으로 제한하지 않고 의미 유사도 검색에 맡긴다.
     for key, val in inferred_attributes.items():
         if not val or key in {"category1", "color", "fabric", "visual_detail", "reasoning"}:
             continue
@@ -763,6 +813,7 @@ def _apply_candidate_filters(db_query: Any, inferred_attributes: dict[str, Any])
         if key in ARRAY_COLUMNS:
             v_list = translated if isinstance(translated, list) else [translated]
             if key == "sex" and len(v_list) > 1:
+                # 공용은 두 성별을 모두 포함해야 하고, 나머지 배열 속성은 하나만 겹쳐도 된다.
                 db_query = db_query.contains(key, v_list)
             else:
                 db_query = db_query.overlaps(key, v_list)
@@ -779,6 +830,7 @@ def _normalize_candidate_row(
     table: str,
     supabase_url: str,
 ) -> dict[str, Any]:
+    # 여러 테이블의 결과를 같은 카드 형식으로 쓰도록 출처와 이미지 주소를 보완한다.
     normalized = {**row, "source_table": table}
     if not normalized.get("image_url"):
         bucket = {
@@ -797,6 +849,7 @@ def filter_candidates_by_metadata(
     rows: list[dict[str, Any]],
     parsed: ParsedTextAttributes,
 ) -> list[dict[str, Any]]:
+    # 이 보조 함수는 조건을 엄격히 적용한다. refine 함수처럼 빈 결과를 완화하지 않는다.
     exact_fields = [
         field
         for field in EXACT_FILTER_FIELDS

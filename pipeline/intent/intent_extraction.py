@@ -22,6 +22,8 @@ INTENT_MODEL_ENV = "GEMINI_INTENT_MODEL"
 LEGACY_METADATA_MODEL_ENV = "GEMINI_METADATA_MODEL"
 LEGACY_GEMINI_MODEL_ENV = "GEMINI_MODEL"
 
+# 한 번의 모델 호출 안에서 '명시된 속성 선택 → 값 추출'을 수행하도록 지시한다.
+# 검색 후보를 과도하게 줄이지 않도록 사용자가 말하지 않은 조건은 추가하지 않는다.
 INFERENCE_PROMPT_TEMPLATE = """You are a fashion search intent analyzer.
 
 User query: {user_query}
@@ -33,6 +35,9 @@ User query: {user_query}
 Step 1 — Identify mentioned attributes (think first):
 Read the query carefully. List ONLY the attributes the user explicitly stated. Do NOT add anything the user did not say.
 Ask yourself: "Did the user actually say this?" If not, exclude it.
+Keep only positively requested values. Omit negated or excluded values; never turn them into positive search conditions.
+If a replacement is stated ("검정 말고 흰색", "면 제외하고 린넨"), keep only the requested replacement.
+If an attribute is only excluded or unspecified, omit it or return null. Do not invent an alternative.
 
 CRITICAL — Do NOT infer attributes from the garment type name itself.
 Examples of forbidden inference:
@@ -53,7 +58,19 @@ Fixed attributes (use predefined values only):
 - season: spring / summer / fall / winter
 - stretch: yes / no
 - thickness: thin / medium / thick
-- fit: slim / regular / loose / oversize
+- fit: slim / regular / loose / oversize / wide
+
+Explicit semantic attributes (short strings, not predefined enums):
+- color: the positively requested color, preferably a concise lowercase English name (e.g. navy, ivory)
+- fabric: the positively requested material, preferably a concise lowercase English name (e.g. cotton, linen, wool)
+These two attributes are similarity inputs, not exact database filters.
+Do not infer color or fabric from garment type, style, occasion, or a reference image unless the user explicitly asks for that image attribute.
+Examples:
+- "네이비 면 소재 셔츠" → category1:top, color:navy, fabric:cotton
+- "검정과 면은 제외한 셔츠" → category1:top; omit color and fabric
+- "검정과 면 말고 아이보리 린넨 셔츠" → category1:top, color:ivory, fabric:linen
+- "와이드 핏 바지" → category1:pants, fit:wide
+Return color and fabric as strings or null, never arrays or objects.
 
 Step 3 — Output:
 Respond with valid JSON only. Include ONLY the attributes from Step 1. No extras.
@@ -76,12 +93,13 @@ _ALLOWED_VALUES: dict[str, set[str]] = {
     "season": {"spring", "summer", "fall", "winter"},
     "stretch": {"yes", "no"},
     "thickness": {"thin", "medium", "thick"},
-    "fit": {"slim", "regular", "loose", "oversized", "oversize"},
+    "fit": {"slim", "regular", "loose", "oversized", "oversize", "wide"},
 }
 
 
 @dataclass(frozen=True)
 class ConservativeMetadataExtraction:
+    # 속성값과 처리 상태를 함께 반환해, 호출자가 모델 결과와 대체 결과를 구분할 수 있게 한다.
     attributes: ParsedTextAttributes
     status: str
     method: str
@@ -91,6 +109,7 @@ class ConservativeMetadataExtraction:
     model_name: str | None = None
 
     def to_metadata(self) -> dict[str, Any]:
+        # API 설명용 요약에는 원문 응답 전체 대신 사용한 필드·모델·오류 정보를 담는다.
         return {
             "status": self.status,
             "method": self.method,
@@ -102,6 +121,7 @@ class ConservativeMetadataExtraction:
 
 
 def resolve_intent_model(model_name: str | None = None) -> str:
+    # 함수 인자가 최우선이며, 없으면 전용 설정 → 기존 공통 설정 → 기본 모델 순서로 정한다.
     return (
         model_name
         or os.getenv(INTENT_MODEL_ENV)
@@ -117,12 +137,14 @@ class IntentExtractionModule:
         from google.genai import types
 
         self._types = types
+        # 이 SDK의 타임아웃 단위는 밀리초다. 설명 생성 REST 클라이언트의 초 단위와 구분한다.
         timeout_ms = int(os.getenv("GEMINI_REQUEST_TIMEOUT_MS", "60000"))
         self.client = genai.Client(
             api_key=api_key or os.getenv("GEMINI_API_KEY"),
             http_options=types.HttpOptions(timeout=timeout_ms),
         )
         self.model_name = resolve_intent_model(model_name)
+        # JSON 형식 출력을 요청하지만, 실제 필드와 값의 검사는 응답을 받은 뒤 다시 수행한다.
         self.config = types.GenerateContentConfig(
             temperature=0.1,
             max_output_tokens=1024,
@@ -136,6 +158,7 @@ class IntentExtractionModule:
         image_mime_type: str | None = None,
         image_url: str | None = None,
     ) -> dict:
+        # 파일 바이트가 있으면 URL보다 우선한다. URL만 주어졌을 때는 직접 내려받는다.
         image_part = None
         if image_bytes:
             image_part = self._types.Part.from_bytes(
@@ -151,9 +174,11 @@ class IntentExtractionModule:
                     mime_type=resp.headers.get("content-type") or "image/jpeg",
                 )
             except Exception:
+                # 이미지 다운로드 실패는 텍스트만 해석하는 경로로 이어진다.
                 image_part = None
 
         if image_part:
+            # 이미지는 요청한 속성의 값을 확인하는 용도이며, 새 필터를 만드는 근거는 아니다.
             image_instruction = (
                 "Reference image provided: use the image ONLY to determine the value of "
                 "attributes the user explicitly mentioned in the query. Do NOT extract or add any "
@@ -176,11 +201,13 @@ class IntentExtractionModule:
             config=self.config,
         )
         parsed = _parse_json(str(response.text or "").strip())
+        # 파싱 실패를 예외로 올려 공통 대체 경로가 처리하게 한다.
         if parsed is None:
             raise RuntimeError("Metadata response JSON parse failed.")
         return parsed
 
 
+# 같은 모델의 API 클라이언트를 요청마다 다시 만들지 않도록 재사용한다.
 _module_cache: dict[str, IntentExtractionModule] = {}
 
 
@@ -200,6 +227,7 @@ def extract_conservative_metadata(
     client: Any = None,
     model_name: str | None = None,
 ) -> ConservativeMetadataExtraction:
+    # 외부에서 호출하는 진입점: 요청 문장·선택적 이미지를 받아 정규화된 속성을 반환한다.
     resolved_model = resolve_intent_model(model_name)
     try:
         try:
@@ -213,6 +241,7 @@ def extract_conservative_metadata(
             image_url=image_url,
         )
         raw_str = json.dumps(raw, ensure_ascii=False)
+        # 모델의 자유로운 출력값을 검색 모듈이 사용하는 속성 구조로 정규화한다.
         attrs = _map_to_parsed_attributes(raw)
         return ConservativeMetadataExtraction(
             attributes=attrs,
@@ -223,6 +252,7 @@ def extract_conservative_metadata(
             model_name=resolved_model,
         )
     except Exception as exc:
+        # 모델 호출·파싱이 실패하면 텍스트 규칙 파서의 결과와 degraded 상태를 반환한다.
         return ConservativeMetadataExtraction(
             attributes=parse_text_attributes(query),
             status="degraded",
@@ -235,7 +265,7 @@ def extract_conservative_metadata(
 
 
 def analyze_fashion_intent(text_input: str, image_input: str | None = None) -> dict[str, str]:
-    """Public API used by /analyze for conservative fashion intent extraction."""
+    """파일 경로·URL 입력을 지원하는 보조 래퍼. HTTP /analyze는 추출 함수를 직접 호출한다."""
     image_url = image_input if image_input and image_input.startswith(("http://", "https://")) else None
     image_bytes = None
     if image_input and not image_url and os.path.exists(image_input):
@@ -251,6 +281,7 @@ def analyze_fashion_intent(text_input: str, image_input: str | None = None) -> d
 
 
 def _map_to_parsed_attributes(raw: dict) -> ParsedTextAttributes:
+    # reasoning 같은 부가 설명은 제외하고 ParsedTextAttributes에 정의된 필드만 읽는다.
     values: dict[str, str | None] = {}
     for field in ParsedTextAttributes.__dataclass_fields__:
         values[field] = _normalize(field, raw.get(field))
@@ -258,6 +289,13 @@ def _map_to_parsed_attributes(raw: dict) -> ParsedTextAttributes:
 
 
 def _normalize(field: str, value: Any) -> str | None:
+    # 자유문자열 속성도 계약을 검사한다. 누락·잘못된 형식을 원문 키워드로 보충하지 않는다.
+    if field in {"color", "fabric"}:
+        if not isinstance(value, str):
+            return None
+        normalized = re.sub(r"\s+", " ", value).strip().lower()
+        return None if normalized in {"", "null", "none", "-"} else normalized
+    # 모델이 출력한 여러 '값 없음' 표현을 None 하나로 통일한다.
     if value in (None, "", "null", "none", "None", "-", []):
         return None
     normalized = str(value).strip()
@@ -265,12 +303,14 @@ def _normalize(field: str, value: Any) -> str | None:
         return None
     lowered = normalized.lower()
     lowered = _VALUE_ALIASES.get((field, lowered), lowered)
+    # 고정 속성은 허용된 값만 남기고, 알 수 없는 값은 필터에 넣지 않는다.
     if field in _ALLOWED_VALUES and lowered not in _ALLOWED_VALUES[field]:
         return None
     return lowered if field in _ALLOWED_VALUES else normalized
 
 
 def _parse_json(text: str) -> dict | None:
+    # 코드 블록 또는 중괄호 부분을 파싱하고, 사전(dict)으로 읽힌 결과만 남긴다.
     try:
         m = re.search(r"```json\s*(.*?)\s*```", text, re.DOTALL)
         if m:

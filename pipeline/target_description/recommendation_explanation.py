@@ -118,6 +118,7 @@ VALUE_ALIASES = {
 
 @dataclass(frozen=True)
 class RecommendationExplanationResult:
+    # 최종 문구뿐 아니라 모델 호출·대체 문구 사용 여부도 응답 메타데이터로 남긴다.
     recommendation_reason: str
     method: str
     uses_additional_model_call: bool
@@ -144,6 +145,7 @@ def attach_recommendation_explanations(
     parsed_attributes: dict[str, str] | None,
     target_description_ko: str,
 ) -> list[dict[str, Any]]:
+    # 상품별 속성을 대조하는 보조 경로다. 현재 /search는 아래의 요청 단위 설명을 사용한다.
     return [
         {
             **row,
@@ -168,6 +170,8 @@ def generate_query_recommendation_explanation(
     model_name: str | None = None,
     allow_model_call: bool = True,
 ) -> RecommendationExplanationResult:
+    # 실제 검색 결과 목록을 받지 않고, 요청 조건과 목표 설명으로 공통 추천 문구를 만든다.
+    # 모델 호출을 못 하더라도 응답할 수 있도록 규칙 기반 문구를 먼저 준비한다.
     fallback = build_query_recommendation_explanation(
         parsed_attributes=parsed_attributes,
         target_description_ko=target_description_ko,
@@ -175,6 +179,7 @@ def generate_query_recommendation_explanation(
         has_reference_image=has_reference_image,
     )
     model_name = resolve_recommendation_reason_model(model_name)
+    # 모델 호출을 끈 경우와 키가 없는 경우에는 네트워크 요청 없이 대체 문구를 반환한다.
     if not allow_model_call:
         return RecommendationExplanationResult(
             recommendation_reason=fallback,
@@ -207,6 +212,7 @@ def generate_query_recommendation_explanation(
             prompt=prompt,
             model_name=model_name,
         )
+        # 한국어·문장 수·금지 표현을 확인한다. 상품과의 사실 일치 여부를 검증하는 단계는 아니다.
         reason = _validate_generated_reason(generated)
         return RecommendationExplanationResult(
             recommendation_reason=reason,
@@ -216,6 +222,7 @@ def generate_query_recommendation_explanation(
             model=model_name,
         )
     except Exception as exc:
+        # 설명 생성 실패로 검색 결과 전체를 실패시키지 않고 준비한 문구를 반환한다.
         return RecommendationExplanationResult(
             recommendation_reason=fallback,
             method="deterministic_query_summary",
@@ -232,12 +239,14 @@ def build_query_recommendation_explanation(
     detail_target_description: str | None = None,
     has_reference_image: bool = False,
 ) -> str:
+    # API 없이 속성과 문장 템플릿만으로 만드는 대체 문구다.
     attributes = parsed_attributes or {}
     target = target_description_ko.strip()
     conditions = _condition_phrases(attributes, target, detail_target_description)
     condition_text = _join_korean_phrases(conditions)
 
     if has_reference_image:
+        # 이미지에서 유지하려는 특징을 앞 문장에 넣고, 같은 조건을 뒤에서 중복하지 않게 한다.
         image_focus = _reference_image_focus(attributes)
         condition_text = _join_korean_phrases(
             _conditions_without_reference_focus(conditions, image_focus)
@@ -272,6 +281,7 @@ def build_query_recommendation_explanation(
 
 
 def resolve_recommendation_reason_model(model_name: str | None = None) -> str:
+    # 추천 문구 전용 모델을 지정하지 않으면 검색용 설명문 모델 설정을 따른다.
     return (
         model_name
         or os.getenv(RECOMMENDATION_REASON_MODEL_ENV)
@@ -301,6 +311,7 @@ def _build_gemini_recommendation_reason_prompt(
         ),
     }
     payload = {
+        # 상품 행 대신 요청과 해석 결과를 전달하므로, 이 문구는 요청 전체에 대한 설명이다.
         "user_query": query,
         "has_reference_image": has_reference_image,
         "extracted_attributes": parsed_attributes,
@@ -327,6 +338,7 @@ def _generate_gemini_recommendation_reason(
     prompt: str,
     model_name: str,
 ) -> str:
+    # 검색용 설명문 생성과는 별도의 Gemini 호출이며, 자체 타임아웃을 적용한다.
     timeout_ms = int(
         os.getenv(
             RECOMMENDATION_REASON_TIMEOUT_ENV,
@@ -354,6 +366,7 @@ def _generate_gemini_recommendation_reason(
         method="POST",
     )
     try:
+        # 환경변수는 밀리초로 받고 urllib에는 초로 변환해 전달한다.
         with urllib.request.urlopen(request, timeout=timeout_ms / 1000) as response:
             response_json = json.loads(response.read().decode("utf-8"))
         text = response_json["candidates"][0]["content"]["parts"][0]["text"].strip()
@@ -372,6 +385,7 @@ def _validate_generated_reason(text: str) -> str:
         raise RuntimeError("Recommendation reason response is empty.")
     if not re.search(r"[가-힣]", reason):
         raise RuntimeError("Recommendation reason response is not Korean.")
+    # 프롬프트는 두 문장을 요청하지만, 현재 검사는 두 문장 미만인지만 확인한다.
     if _sentence_count(reason) < 2:
         raise RuntimeError("Recommendation reason response is not two sentences.")
     if re.search(r"[*#`{}\\[\\]]", reason):
@@ -386,6 +400,7 @@ def _validate_generated_reason(text: str) -> str:
 
 
 def _clean_generated_reason(text: str) -> str:
+    # 모델이 붙인 코드 블록·바깥따옴표·중복 공백을 제거해 화면용 한 문단으로 만든다.
     reason = str(text or "").strip()
     reason = re.sub(r"^```(?:text)?\s*|\s*```$", "", reason).strip()
     reason = reason.strip("\"'“”‘’")
@@ -402,6 +417,7 @@ def build_recommendation_explanation(
     parsed_attributes: dict[str, str],
     target_description_ko: str,
 ) -> dict[str, Any]:
+    # 개별 상품 데이터가 주어지는 경우, 요청 속성과 일치한 항목을 설명 근거로 모은다.
     matched_attributes = [
         {
             "field": field,
@@ -440,6 +456,7 @@ def _matches_attribute(row_value: Any, field: str, expected: str) -> bool:
         return False
 
     variants = VALUE_ALIASES.get(field, {}).get(expected.lower(), (expected,))
+    # 영어 속성명과 한국어 저장값 등의 별칭 중 하나가 상품 값에 포함되는지 확인한다.
     return any(_normalize(variant) in row_text for variant in variants)
 
 
@@ -476,6 +493,7 @@ def _condition_phrases(
         phrases.append(f"{attributes['fabric']} 소재")
 
     if category == "top":
+        # 상의는 소매, 하의·원피스는 기장 중심으로 한국어 조건을 조합한다.
         phrases.append(_top_phrase(sleeve, target_description_ko))
         fit = _attribute_condition_phrase("fit", attributes.get("fit"))
         if fit:
@@ -550,6 +568,7 @@ def _color_phrase(value: str) -> str:
 
 
 def _detail_phrases(detail_target_description: str | None) -> list[str]:
+    # 모델 호출 없이 미리 정한 디테일 단어를 찾아 설명에 쓸 한국어 표현으로 바꾼다.
     text = str(detail_target_description or "").lower()
     details: list[str] = []
     if "character" in text or "캐릭터" in text:
@@ -634,6 +653,7 @@ def _join_korean_phrases(phrases: list[str]) -> str:
 
 
 def _dedupe_phrases(phrases: list[str]) -> list[str]:
+    # 같은 표현은 한 번만 남기되 먼저 나타난 순서를 유지한다.
     seen: set[str] = set()
     deduped: list[str] = []
     for phrase in phrases:

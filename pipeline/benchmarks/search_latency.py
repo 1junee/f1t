@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import logging
 import math
 import os
 import random
@@ -30,10 +31,15 @@ from pipeline.recommendation_service import (
     _rank_stored_gemini_vectors,
 )
 from pipeline.retrieval.candidate_selection import (
-    TABLE_ROUTING_MAP,
+    METADATA_PREFETCH_LIMIT,
+    ParsedTextAttributes,
+    build_attribute_text_search_plan,
+    refine_attribute_text_results,
     retrieve_candidates,
 )
-from pipeline.retrieval.target_description_retrieval import RetrieveModule
+from pipeline.retrieval.target_description_retrieval import (
+    GEMINI_EMBEDDING_DIM, GEMINI_EMBEDDING_MODEL, RetrieveModule,
+)
 from pipeline.vector_db_client import SupabaseVectorSearchClient
 
 
@@ -41,9 +47,9 @@ BASELINE_RPC = "benchmark_full_scan_fashion_items_768"
 DEFAULT_TOP_K = 10
 DEFAULT_REPETITIONS = 3
 DEFAULT_EXPECTED_QUERY_COUNT = 108
-DEFAULT_MAX_CANDIDATES = 20_000
-DEFAULT_PAGE_SIZE = 1_000
-CATEGORY2_KEYWORDS = {"dress": "원피스", "skirt": "스커트"}
+DEFAULT_MAX_CANDIDATES = METADATA_PREFETCH_LIMIT
+DEFAULT_PAGE_SIZE = 100
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -103,6 +109,7 @@ def _target_description(record: dict[str, Any], query: str) -> str:
 
 
 def load_query_cases(paths: Sequence[Path]) -> list[QueryCase]:
+    # 입력 형식을 통일하고 중복 ID를 막는다. 설명문이 없으면 원래 질의를 사용한다.
     cases: list[QueryCase] = []
     seen_ids: set[str] = set()
     for path in paths:
@@ -140,8 +147,18 @@ def load_query_cases(paths: Sequence[Path]) -> list[QueryCase]:
 
 
 class EmbeddingCache:
-    def __init__(self, path: Path) -> None:
+    # 문장뿐 아니라 모델·차원·입력 전처리가 같을 때만 벡터를 재사용한다.
+    def __init__(
+        self, path: Path, *, model: str | None = None,
+        dimensions: int | None = None,
+        preprocessing: str = "task: search result | query: {text}",
+    ) -> None:
         self.path = path
+        self.contract = {
+            "model": model or os.getenv("GEMINI_EMBEDDING_MODEL", GEMINI_EMBEDDING_MODEL),
+            "dimensions": dimensions or int(os.getenv("GEMINI_EMBEDDING_DIM", str(GEMINI_EMBEDDING_DIM))),
+            "preprocessing": preprocessing,
+        }
         self._entries: dict[str, dict[str, Any]] = {}
         if path.exists():
             payload = json.loads(path.read_text(encoding="utf-8"))
@@ -188,19 +205,24 @@ class EmbeddingCache:
         changed = False
         result: dict[str, list[float]] = {}
         for cache_key, text, result_key in items:
+            # 계약 정보가 없는 예전 캐시도 다시 계산한다. 같은 차원만으로 같은 벡터 공간이 되지는 않는다.
             cached = self._entries.get(cache_key)
             if (
                 isinstance(cached, dict)
                 and cached.get("text") == text
                 and isinstance(cached.get("embedding"), list)
-                and len(cached["embedding"]) == 768
+                and len(cached["embedding"]) == self.contract["dimensions"]
+                and cached.get("contract") == self.contract
             ):
                 embedding = [float(value) for value in cached["embedding"]]
             else:
                 embedding = encoder.encode_text([text])[0].tolist()
+                if len(embedding) != self.contract["dimensions"]:
+                    raise ValueError("Embedding output dimension does not match cache contract")
                 self._entries[cache_key] = {
                     "text": text,
                     "embedding": embedding,
+                    "contract": self.contract,
                 }
                 changed = True
             result[result_key] = embedding
@@ -276,6 +298,8 @@ class ExhaustiveSearchClient:
 
 
 class HybridSearchRunner:
+    # 후보가 있으면 로컬 재정렬, 없으면 RPC 검색이라는 운영 검색의 분기를 따라간다.
+    # 운영과 같은 계획·후처리 함수를 쓰지만 생성/임베딩 시간은 제외한 검색 구간 실험이다.
     def __init__(
         self,
         vector_client: SupabaseVectorSearchClient,
@@ -297,47 +321,62 @@ class HybridSearchRunner:
         embedding: list[float],
         fabric_embedding: list[float] | None = None,
     ) -> tuple[list[dict[str, Any]], int, str]:
-        attributes = case.attributes
+        # 저장된 명시 속성을 성공한 추출 결과로 재생한다. 모델 호출은 측정 밖이다.
+        extracted = ParsedTextAttributes(**{
+            key: value for key, value in case.attributes.items()
+            if key in ParsedTextAttributes.__dataclass_fields__
+        })
+        plan = build_attribute_text_search_plan(
+            case.query, self.top_k, extracted_attributes=extracted,
+            extraction_metadata={"status": "ok"},
+        )
+        attributes = plan.parsed_attributes.to_dict()
+        prefilter_failed = False
         if _has_exact_metadata_filters(attributes):
-            candidates = self.candidate_fetcher(
-                attributes,
-                include_embeddings=True,
-                page_size=self.page_size,
-                max_rows=self.max_candidates,
-            )
-            if candidates:
-                return (
-                    _rank_stored_gemini_vectors(
-                        embedding=embedding,
-                        rows=candidates,
-                        top_k=self.top_k,
+            try:
+                candidates = self.candidate_fetcher(
+                    attributes, include_embeddings=True,
+                    page_size=self.page_size, max_rows=self.max_candidates,
+                    table_filter=plan.table_filter,
+                    category2_filter=plan.category2_filter,
+                    category2_keyword_filter=plan.category2_keyword_filter,
+                )
+                if candidates:
+                    ranked = _rank_stored_gemini_vectors(
+                        embedding=embedding, rows=candidates, top_k=self.top_k,
                         fabric_embedding=fabric_embedding,
-                    ),
-                    len(candidates),
-                    "sql_prefilter_exact_cosine",
-                )
+                    )
+                    results, _ = refine_attribute_text_results(
+                        ranked, plan.parsed_attributes, self.top_k,
+                    )
+                    return results, len(candidates), "sql_prefilter_exact_cosine"
+            except Exception:
+                # 운영과 동일하게 REST 후보 조회/정렬 실패도 RPC 경로로 전환한다.
+                logger.exception("Benchmark candidate prefilter failed")
+                prefilter_failed = True
 
-        category = str(attributes.get("category1") or "").lower()
-        table_filter = TABLE_ROUTING_MAP.get(category)
-        category2_keyword = CATEGORY2_KEYWORDS.get(category)
-        tables = [table_filter] if table_filter else sorted(VALID_TABLES)
-        results: list[dict[str, Any]] = []
+        filtered = bool(plan.table_filter or plan.category2_filter or plan.category2_keyword_filter)
+        tables = [plan.table_filter] if filtered else sorted(VALID_TABLES)
+        rows: list[dict[str, Any]] = []
         for table in tables:
-            results.extend(
-                self.vector_client.search(
-                    embedding=embedding,
-                    match_count=self.top_k,
-                    table_filter=table,
-                    category2_keyword_filter=category2_keyword,
-                    fabric_embedding=fabric_embedding,
-                )
-            )
-        results.sort(key=lambda row: float(row.get("similarity") or 0), reverse=True)
-        hnsw_candidates_per_table = min(max(self.top_k * 5, 50), 100)
+            # 테이블 일부만 성공한 결과는 정상 표본으로 집계하지 않는다.
+            rows.extend(self.vector_client.search(
+                embedding=embedding, match_count=plan.prefetch_count,
+                table_filter=table,
+                category2_filter=plan.category2_filter,
+                category2_keyword_filter=plan.category2_keyword_filter,
+                fabric_embedding=fabric_embedding,
+            ))
+        if not filtered and not rows:
+            raise RuntimeError("모든 테이블 검색이 실패했습니다. 잠시 후 다시 시도해주세요.")
+        rows.sort(key=lambda row: float(row.get("similarity") or 0), reverse=True)
+        results, _ = refine_attribute_text_results(
+            rows[:plan.prefetch_count], plan.parsed_attributes, self.top_k,
+        )
+        candidates_per_table = min(max(plan.prefetch_count * 5, 50), 100)
         return (
-            results[: self.top_k],
-            hnsw_candidates_per_table * len(tables),
-            "hnsw_fallback",
+            results, candidates_per_table * len(tables),
+            "hnsw_fallback_prefilter_error" if prefilter_failed else "hnsw_fallback",
         )
 
 
@@ -345,6 +384,7 @@ def _measure(
     method: str,
     action: Callable[[], tuple[list[dict[str, Any]], int, str]],
 ) -> SearchObservation:
+    # DB 요청과 결과 수신을 포함한 검색 구간만 잰다. 임베딩은 호출 전에 준비된다.
     started = time.perf_counter_ns()
     results, candidate_count, strategy = action()
     duration_ms = (time.perf_counter_ns() - started) / 1_000_000
@@ -370,6 +410,8 @@ def _percentile(values: Sequence[float], percentile: float) -> float:
 
 
 def summarize_samples(samples: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    # 성공 표본의 지연을 집계하고, 같은 질의·반복끼리 두 방식의 차이를 비교한다.
+    # 실패 표본은 지연 집계에서 제외되므로 평균·p95와 실패 개수를 함께 읽어야 한다.
     successful = [sample for sample in samples if sample.get("error") is None]
     durations: dict[str, list[float]] = {
         method: [
@@ -401,8 +443,10 @@ def summarize_samples(samples: Sequence[dict[str, Any]]) -> dict[str, Any]:
         for values in paired.values()
         if {"full_scan", "hybrid"}.issubset(values)
     ]
-    full_mean = method_summary["full_scan"]["mean_ms"]
-    hybrid_mean = method_summary["hybrid"]["mean_ms"]
+    # 비교 비율도 두 방식이 모두 성공한 같은 질의·반복만 사용한다.
+    complete_pairs = [values for values in paired.values() if {"full_scan", "hybrid"}.issubset(values)]
+    full_mean = statistics.fmean(v["full_scan"] for v in complete_pairs) if complete_pairs else math.nan
+    hybrid_mean = statistics.fmean(v["hybrid"] for v in complete_pairs) if complete_pairs else math.nan
 
     hybrid_samples = [sample for sample in successful if sample["method"] == "hybrid"]
     candidate_counts = [int(sample["candidate_count"]) for sample in hybrid_samples]
@@ -466,6 +510,7 @@ def run_benchmark(
     warmup_queries: int,
     seed: int,
 ) -> list[dict[str, Any]]:
+    # 워밍업은 연결·캐시 준비용이며 측정 표본에 넣지 않는다. 여기서 실패하면 본 측정에 진입하지 않는다.
     for case in cases[:warmup_queries]:
         embedding = embeddings[case.query_id]
         fabric_embedding = fabric_embeddings.get(case.query_id)
@@ -475,6 +520,7 @@ def run_benchmark(
     schedule = [
         (case, repetition) for repetition in range(1, repetitions + 1) for case in cases
     ]
+    # 질의 순서와 방식 실행 순서를 섞어 실행 순서에 따른 영향을 줄인다.
     random.Random(seed).shuffle(schedule)
 
     samples: list[dict[str, Any]] = []
@@ -561,6 +607,7 @@ def _write_results(output: Path, payload: dict[str, Any]) -> None:
 
 
 def _safe_json_value(value: Any) -> Any:
+    # 표본이 없을 때 생긴 NaN 등을 JSON의 null로 바꿔 표준 JSON으로 저장한다.
     if isinstance(value, float) and (math.isnan(value) or math.isinf(value)):
         return None
     if isinstance(value, dict):
@@ -615,6 +662,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "Do not duplicate queries to satisfy the count."
         )
     if args.dry_run:
+        # 입력 확인만 할 때는 API 클라이언트를 만들거나 실험을 실행하지 않는다.
         return 0
 
     load_pipeline_env()
@@ -624,7 +672,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise RuntimeError("SUPABASE_URL and SUPABASE_KEY are required")
 
     embedding_cache = EmbeddingCache(args.embedding_cache)
-    encoder = RetrieveModule()
+    encoder = RetrieveModule(
+        model=embedding_cache.contract["model"],
+        dimensionality=embedding_cache.contract["dimensions"],
+    )
     embeddings = embedding_cache.prepare(cases, encoder)
     fabric_embeddings = embedding_cache.prepare_fabric(cases, encoder)
     exhaustive = ExhaustiveSearchClient(supabase_url, supabase_key)
@@ -658,6 +709,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "warmup_queries": args.warmup_queries,
                 "max_candidates": args.max_candidates,
                 "page_size": args.page_size,
+                "embedding_contract": embedding_cache.contract,
+                "postfilter": "refine_attribute_text_results",
+                "candidate_count_scope": "REST rows or RPC candidate ceiling, not visited HNSW nodes",
                 "seed": args.seed,
                 "raw_query_description_fallback_count": fallback_count,
             },

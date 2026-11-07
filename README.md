@@ -19,6 +19,8 @@
 
 ## 프로젝트 요약
 
+코드를 읽기 시작한다면 [코드 흐름과 읽을 순서](docs/CODE_GUIDE.md)를 먼저 확인하세요. 모델 비교는 [임베딩 실험 계획](experiments/embedding_comparison/PLAN.md)에 정리했습니다. [404 원인과 코드 검토·수정 우선순위](docs/CODE_REVIEW.md), [수정 반영과 배포 설정](docs/DEPLOYMENT.md)도 함께 읽을 수 있습니다.
+
 F1T는 상품명을 정확히 몰라도 상황, 스타일, 색상, 소재 같은 표현으로 19,833개 패션 상품을 검색할 수 있도록 설계한 공학종합설계 우수작입니다. 사용자의 문장에서 직접 언급된 조건은 메타데이터 필터로 후보를 줄이고, 참고 이미지와 문장은 하나의 Target Description으로 합쳐 임베딩 유사도 기반 재정렬에 사용합니다.
 
 | 항목 | 결과 |
@@ -30,9 +32,13 @@ F1T는 상품명을 정확히 몰라도 상황, 스타일, 색상, 소재 같은
 | 평균 검색 후보 | 19,833개 -> 2,707개 |
 | 후보 축소율 | 86.35% |
 
+아래 평가 설명과 위 지표는 기존 평가 기록이며, 이번 버그 수정 버전에서 재측정한 수치는 아닙니다.
+
 평가 결과는 텍스트 질의와 이미지 포함 질의 102개에서 첫 번째 검색 결과를 수동으로 판정한 값입니다. 완전 적합 80건, 부분 적합 17건, 실패 5건으로 분류했습니다.
 
 ## 흐름과 설계
+
+[UI 수정본과 디자인 조사](docs/design/README.md) · [검색 파이프라인 그림](docs/design/f1t-pipeline.svg)
 
 ```mermaid
 flowchart LR
@@ -98,7 +104,7 @@ cd f1t
 conda create -n f1t python=3.11 -y
 conda activate f1t
 pip install -r backend/requirements.txt
-cp pipeline/.env.example pipeline/.env
+test -f pipeline/.env || cp pipeline/.env.example pipeline/.env
 ```
 
 `pipeline/.env`에 백엔드 설정을 입력합니다.
@@ -107,7 +113,7 @@ cp pipeline/.env.example pipeline/.env
 GEMINI_API_KEY=
 SUPABASE_URL=
 SUPABASE_KEY=
-FRONTEND_ORIGINS=http://localhost:5173
+FRONTEND_ORIGINS=http://localhost:5173,http://127.0.0.1:5173
 ```
 
 백엔드와 프론트엔드를 실행합니다.
@@ -117,9 +123,11 @@ uvicorn backend.api:app --host 0.0.0.0 --port 8000
 
 cd frontend
 npm install
-cp .env.example .env.local
+test -f .env.local || cp .env.example .env.local
 npm run dev -- --host 127.0.0.1 --port 5173
 ```
+
+`frontend/.env.local`에는 공개용 Supabase 설정과 `VITE_API_BASE_URL=http://127.0.0.1:8000`을 입력합니다. 기존 환경 파일이 있으면 예제로 덮어쓰지 말고 필요한 값만 수정하세요. 환경변수 변경 후에는 개발 서버를 재시작합니다.
 
 검증 명령은 다음과 같습니다.
 
