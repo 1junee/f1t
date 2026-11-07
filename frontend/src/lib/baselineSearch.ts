@@ -73,7 +73,7 @@ export type SearchPipelineMetadata = {
 }
 
 export type BaselineSearchResponse = {
-  // results는 상품 카드, 나머지 설명/추론 정보는 접힌 검색 상세 영역에 사용한다.
+  // results는 상품 카드에 사용한다. 검색 상세에는 조건·추천 이유만 표시하고 기술 메타데이터는 응답에 보존한다.
   mode: 'baseline' | 'supabase_vector' | string
   provider: string
   pipeline?: SearchPipelineMetadata

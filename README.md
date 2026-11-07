@@ -1,27 +1,44 @@
 # F1T — Fashion Intention Translator
 
-> 자연어와 참고 이미지를 함께 해석해 사용자의 조건에 가까운 패션 상품을 찾는 멀티모달 검색 프로젝트입니다.
+**문장과 참고 이미지에 담긴 조건을 함께 반영하는 4인 팀 패션 검색 프로젝트**
 
-<p align="center">
-  <a href="https://f1t-clean-front.vercel.app/"><img alt="Service" src="https://img.shields.io/badge/service-live-111827?style=flat-square"></a>
-  <img alt="Python" src="https://img.shields.io/badge/python-3.11-3776AB?style=flat-square&logo=python&logoColor=white">
-  <img alt="FastAPI" src="https://img.shields.io/badge/backend-FastAPI-009688?style=flat-square&logo=fastapi&logoColor=white">
-  <img alt="React" src="https://img.shields.io/badge/frontend-React_19-61DAFB?style=flat-square&logo=react&logoColor=111827">
-</p>
+“출근할 때 입을 단정한 검은 셔츠”처럼 원하는 옷을 설명하거나, 사진에 “비슷하지만 여유 있는 핏으로”라는 조건을 더해 상품을 찾습니다. 상품명뿐 아니라 색상·소재·핏·입을 상황을 검색에 반영하는 것을 목표로 합니다.
 
-<p align="center">
-  <a href="https://f1t-clean-front.vercel.app/">Service</a> ·
-  <a href="backend/README.md">Backend</a> ·
-  <a href="pipeline/README.md">Pipeline</a> ·
-  <a href="pipeline/benchmarks/README.md">Benchmark</a> ·
-  <a href="frontend/README.md">Frontend</a>
-</p>
+[팀 서비스 데모](https://f1t-clean-front.vercel.app/) · [백엔드](backend/README.md) · [검색 파이프라인](pipeline/README.md) · [프론트엔드](frontend/README.md)
 
-## 프로젝트 요약
+## 프로젝트 개요
 
-코드를 읽기 시작한다면 [코드 흐름과 읽을 순서](docs/CODE_GUIDE.md)를 먼저 확인하세요. 모델 비교는 [임베딩 실험 계획](experiments/embedding_comparison/PLAN.md)에 정리했습니다. [404 원인과 코드 검토·수정 우선순위](docs/CODE_REVIEW.md), [수정 반영과 배포 설정](docs/DEPLOYMENT.md)도 함께 읽을 수 있습니다.
+- **해결하려는 문제:** 원하는 옷의 상품명이나 정확한 검색어를 모를 때, 여러 조건을 조합해 상품을 찾기 어렵습니다.
+- **접근 방식:** 문장과 이미지를 검색용 설명으로 정리하고, 명시한 속성으로 후보를 좁힌 뒤 의미·시각적 유사도로 정렬합니다.
+- **데이터 범위:** 상의·바지·원피스·스커트 등 패션 상품 19,833개를 대상으로 구축했습니다.
+- **팀 구성:** 데이터 수집·구축, 검색 파이프라인, 서비스 구현, 평가 질의 구성을 분담한 4인 팀 프로젝트입니다.
 
-F1T는 상품명을 정확히 몰라도 상황, 스타일, 색상, 소재 같은 표현으로 19,833개 패션 상품을 검색할 수 있도록 설계한 공학종합설계 우수작입니다. 사용자의 문장에서 직접 언급된 조건은 메타데이터 필터로 후보를 줄이고, 참고 이미지와 문장은 하나의 Target Description으로 합쳐 임베딩 유사도 기반 재정렬에 사용합니다.
+## 담당 역할 — 허원준
+
+팀 리더로서 백엔드와 검색 파이프라인 통합을 맡았습니다. 이 저장소는 [팀 프로젝트 F1T](https://github.com/cs-f1t/f1t)를 기반으로, 담당한 검색 흐름과 기술적 판단을 설명합니다.
+
+| 담당 영역 | 구현 내용과 판단 |
+| --- | --- |
+| 백엔드·파이프라인 통합 | FastAPI 요청을 속성 추출, 설명문 생성, 후보 조회, 랭킹, 추천 이유 반환으로 연결 |
+| 목표 상품 설명문 | 참고 이미지의 특징과 텍스트 조건을 하나의 검색용 설명문으로 구성해 임베딩 검색에 전달 |
+| 후보 검색·랭킹 | 메타데이터 조건으로 후보를 좁히고 이미지·소재 벡터 점수를 결합하는 흐름 통합 |
+| 병렬 처리 | 독립적인 속성 추출과 설명문 생성의 병렬화 아이디어를 제안하고, 외부 API 응답 대기를 겹치도록 구성 |
+| 서비스 연결 | 프론트엔드와 검색 API 연결, Vercel·Cloudtype 배포 구성 |
+
+상품 데이터 수집·DB·임베딩 구축·속성 추출 등 팀원이 담당한 영역은 아래 팀 구성 표에 구분했습니다. 실험 결과는 팀의 공동 산출물입니다.
+
+## 주요 기능
+
+| 사용 예시 | 서비스 동작 |
+| --- | --- |
+| “검은색 긴팔 셔츠” | 문장에서 색상·소매·종류 등 조건을 추출해 상품 검색에 반영 |
+| “주말 나들이에 입을 편한 옷” | 상황과 스타일을 검색용 설명으로 구체화해 관련 상품 탐색 |
+| 참고 이미지 + “이런 느낌에 소재는 린넨으로” | 이미지 특징과 변경 요청을 함께 반영한 설명문 생성 |
+| 검색 결과 확인 | 상품·가격·해석한 조건·추천 이유 확인 및 원본 상품 페이지 이동 |
+
+## 기존 실험 결과
+
+팀에서 단일 조건부터 복합 조건까지 구성한 텍스트·이미지 포함 질의 102개에 대한 기존 내부 평가 집계입니다.
 
 | 항목 | 결과 |
 | --- | ---: |
@@ -29,127 +46,110 @@ F1T는 상품명을 정확히 몰라도 상황, 스타일, 색상, 소재 같은
 | 평가 질의 | 102개 |
 | Top-1 완전 적합 | 80건 (78.4%) |
 | Top-1 부분 적합 포함 | 97건 (95.1%) |
-| 평균 검색 후보 | 19,833개 -> 2,707개 |
+| 평균 검색 후보 | 19,833개 → 2,707개 |
 | 후보 축소율 | 86.35% |
 
-아래 평가 설명과 위 지표는 기존 평가 기록이며, 이번 버그 수정 버전에서 재측정한 수치는 아닙니다.
+첫 번째 검색 결과를 완전 적합 80건, 부분 적합 17건, 실패 5건으로 분류한 집계입니다. 평가는 AI 판정을 활용했습니다. 위 수치는 과거 실험 기록이며, 아래 기술 스택의 현재 기본 모델과 수정된 코드로 재측정한 결과는 아닙니다.
 
-평가 결과는 텍스트 질의와 이미지 포함 질의 102개에서 첫 번째 검색 결과를 수동으로 판정한 값입니다. 완전 적합 80건, 부분 적합 17건, 실패 5건으로 분류했습니다.
-
-## 흐름과 설계
-
-[UI 수정본과 디자인 조사](docs/design/README.md) · [검색 파이프라인 그림](docs/design/f1t-pipeline.svg)
+## 검색 구조
 
 ```mermaid
-flowchart LR
-    A["자연어 요청<br/>선택적 참고 이미지"]
-    B["명시 속성 추출"]
-    C["Target Description 생성"]
-    D{"정확한 필터 조건이 있는가?"}
-    E["Supabase REST<br/>후보 축소"]
-    F["저장 벡터로<br/>로컬 재정렬"]
-    G["pgvector RPC<br/>HNSW 후보 검색"]
-    H{"소재 조건이 있는가?"}
-    I["이미지 0.8 + 소재 0.2"]
-    J["이미지 유사도 1.0"]
-    K["Top-K 결과와<br/>한국어 추천 이유"]
+flowchart TD
+    Input["문장 + 선택적 참고 이미지"]
+    Attributes["명시 속성 추출"]
+    Description["목표 상품 설명문 생성"]
+    Filter["카테고리·속성으로 검색 계획 구성"]
+    Embedding["설명문·선택적 소재 조건 임베딩"]
+    Branch{"정확한 메타데이터 조건이 있는가?"}
+    REST["Supabase REST 후보 조회"]
+    Local["저장 벡터로 로컬 재정렬"]
+    RPC["pgvector RPC: HNSW 후보 검색·재정렬"]
+    Result["Top-K 상품 + 한국어 추천 이유"]
 
-    A --> B
-    A --> C
-    B --> D
-    C --> D
-    D -- 있음 --> E
-    E -- 후보 있음 --> F
-    E -- 후보 없음·오류 --> G
-    D -- 없음 --> G
-    F --> H
-    G --> H
-    H -- 있음 --> I --> K
-    H -- 없음 --> J --> K
+    Input --> Attributes --> Filter
+    Input --> Description --> Embedding
+    Filter --> Branch
+    Embedding --> Branch
+    Branch -- 있음 --> REST
+    REST -- 후보 있음 --> Local --> Result
+    REST -- 후보 없음 또는 조회 실패 --> RPC
+    Branch -- 없음 --> RPC --> Result
 ```
 
-핵심 설계는 명시 속성 추출과 속성값 추출을 분리하는 데 있습니다. VLM이 사용자가 말하지 않은 속성을 채우는 문제를 줄이기 위해 먼저 언급된 속성의 종류를 식별하고, 해당 속성의 값만 추출합니다. 소매, 기장, 성별, 계절, 신축성, 두께, 핏은 Supabase 메타데이터 필터에 사용하고 색상과 소재는 Target Description과 임베딩 점수에 반영합니다.
+참고 이미지를 질의 벡터로 바로 사용하는 대신, 이미지와 문장을 함께 해석해 만든 **목표 상품 설명문(Target Description)**을 검색 입력으로 사용합니다. 이 설명문을 상품 이미지의 저장 벡터와 비교합니다.
 
-이미지·소재 임베딩 재정렬은 `이미지 0.8 + 소재 0.2` 가중치를 사용합니다. 소재 조건이 없으면 이미지 유사도만 사용하며, 참고 이미지와 텍스트가 충돌하면 사용자가 명시한 텍스트 조건을 우선합니다.
+### 1. 명시한 조건과 의미 기반 검색의 결합
 
-## 개인 기여
+사용자가 언급한 속성의 종류를 먼저 확인하고 해당 값만 추출해, 말하지 않은 조건이 필터에 추가되는 것을 줄이도록 설계했습니다. 소매·기장·성별·계절·신축성·두께·핏 등 정확한 메타데이터 조건이 있으면 후보를 조회한 뒤 저장 벡터로 재정렬합니다. 조건이 없거나 후보 조회가 비어 있거나 실패하면 pgvector RPC 검색으로 전환합니다.
 
-팀 리더로서 백엔드와 검색 파이프라인 통합, Target Description 생성 경로, 메타데이터 후보 축소, 벡터 검색, 이미지·소재 가중 랭킹, 한국어 추천 이유 생성, 배포 구조와 운영 DB 벡터 용량 정책을 담당했습니다.
+색상과 소재는 모든 경우에 일치가 보장되는 필수 필터가 아닙니다. 검색용 설명과 유사도 계산에 반영하며, 참고 이미지와 문장의 요구가 다르면 명시한 텍스트 조건을 우선하도록 요청합니다.
 
-| 이름 | 역할 | 담당 영역 |
+### 2. 독립적인 모델 호출의 병렬 처리
+
+검색 대기 시간을 줄이기 위해, 같은 원본 입력을 사용하고 서로의 결과를 기다릴 필요가 없는 **메타데이터 추출과 목표 설명문 생성**을 `ThreadPoolExecutor`로 병렬 실행하도록 구성했습니다. 이후 설명문 번역·설명문 임베딩·선택적 소재 임베딩도 병렬로 처리합니다.
+
+외부 API 응답 대기를 겹치는 방식이며, 필요한 작업이 끝나면 결과를 반환합니다. 병렬화 전후의 응답 시간 개선율은 별도 측정 전이므로 수치로 제시하지 않습니다.
+
+### 3. 이미지와 소재를 함께 고려하는 정렬
+
+소재 조건이 있으면 `이미지 유사도 × 0.8 + 소재 유사도 × 0.2`, 없으면 이미지 유사도로 정렬합니다. 이 가중치는 현재 구현의 설정이며, 비교 실험으로 최적값이 입증된 것은 아닙니다. 유사도는 내부 순위 계산에 사용하고 고객 화면에는 검색 조건과 추천 이유를 제공합니다.
+
+### 4. 검색 경로와 HNSW 후보 수
+
+| 경로 | 처리 방식 | 설계상 의미 |
 | --- | --- | --- |
-| 허원준 | Team Leader | 파이프라인 통합, Target Description, 검색·랭킹, 추천 이유, 비용 관리 |
-| 김상훈 | Team Member | 문서, 평가 질의 구성, 시각 평가, 상품 데이터 크롤링 |
-| 김재혁 | Team Member | 상품 DB, 메타데이터, 이미지·소재 임베딩 구축 |
-| 박주현 | Team Member | VLM 메타데이터 추출, 후보 필터링 설계, 프로젝트 진행 관리 |
+| 메타데이터 후보가 있는 경우 | Supabase REST로 후보와 저장 벡터를 가져와 Python에서 코사인 유사도 계산 | 명시 조건에 맞는 후보 안에서 순위를 계산 |
+| 벡터 검색으로 전환한 경우 | `match_fashion_items_768` RPC에서 이미지 HNSW 후보 검색 후 소재 점수 반영 | 메타데이터 조건이 없거나 후보 조회를 사용할 수 없는 요청도 검색 |
+
+RPC의 최종 반환 수는 1~100개이며, 재정렬 후보는 `min(max(최종 반환 수 × 5, 50), 100)`개로 설정합니다. 기본 Top-10 요청은 후보 50개를 재정렬합니다. `hnsw.ef_search=100`은 HNSW 내부 탐색 폭으로, 재정렬 후보 수와 구분됩니다. 소재 벡터는 이미지 검색이 고른 후보의 순위를 조정하는 데 사용합니다.
+
+구현은 [파이프라인 조율](pipeline/recommendation_service.py), [임베딩 인코딩](pipeline/retrieval/target_description_retrieval.py), [벡터 검색 SQL](pipeline/sql/match_fashion_items_768.sql)에서 확인할 수 있습니다.
+
+## 팀 구성과 역할
+
+팀은 상품 데이터 수집·구축부터 요청 해석, 후보 검색·랭킹, 웹 서비스 연결까지 협업했습니다. 아래는 주요 담당 영역이며, 전체 기능과 실험 결과는 팀 프로젝트의 산출물입니다.
+
+| 팀원 | 역할 | 주요 담당 영역 |
+| --- | --- | --- |
+| 허원준 | 팀 리더 | 백엔드·파이프라인 통합, 목표 설명문 생성, 검색·랭킹, 추천 이유, 배포 연결 |
+| 김상훈 | 팀원 | 문서, 평가 질의 구성, 상품 데이터 크롤링 |
+| 김재혁 | 팀원 | 상품 DB, 메타데이터, 이미지·소재 임베딩 구축 |
+| 박주현 | 팀원 | VLM 메타데이터 추출, 후보 필터링 설계, 프로젝트 진행 관리 |
 
 ## 기술 스택
 
+아래 모델명은 현재 코드의 기본 설정입니다. 과거 평가에 사용한 모델과 동일하다는 의미는 아닙니다.
+
 | 영역 | 기술 |
 | --- | --- |
-| Language | Python 3.11, TypeScript |
-| VLM | Gemini 3.5 Flash, Google Gen AI SDK |
-| Embedding and Retrieval | Gemini Embedding 2, 768 dimensions, cosine similarity |
-| Database | Supabase, PostgreSQL, pgvector, HNSW |
-| Backend | FastAPI, Uvicorn |
-| Frontend | React 19, Vite, Tailwind CSS 4 |
+| Frontend | React 19, TypeScript, Vite, Tailwind CSS |
+| Backend | Python, FastAPI, Uvicorn |
+| 요청 해석·설명 생성 | Gemini (`gemini-3.5-flash`), Google Gen AI SDK |
+| Embedding | Gemini Embedding 2 (`gemini-embedding-2`), 768차원 |
+| Retrieval | Supabase PostgreSQL, pgvector, HNSW, 코사인 유사도 |
 | Deployment | Vercel, Cloudtype |
 
-## 실행과 검증
+## 검증 범위와 한계
 
-```bash
-git clone https://github.com/cs-f1t/f1t.git
-cd f1t
+- 프론트엔드는 검색·카탈로그의 비동기 상태와 API 실패 처리를 테스트하고, 백엔드·파이프라인은 요청 처리와 검색 분기 등을 테스트합니다.
+- 기존 실험 결과는 위 표에 보존했습니다. 현재 버전의 검색 품질 및 병렬화 효과를 비교하려면 데이터·모델·판정 기준을 고정한 재측정이 필요합니다.
+- 검색 결과는 수집된 상품 정보를 기준으로 합니다. 현재 가격·재고·판매 여부는 원본 쇼핑몰에서 확인해야 합니다.
 
-conda create -n f1t python=3.11 -y
-conda activate f1t
-pip install -r backend/requirements.txt
-test -f pipeline/.env || cp pipeline/.env.example pipeline/.env
-```
+## 로컬 실행
 
-`pipeline/.env`에 백엔드 설정을 입력합니다.
+외부 모델 API와 상품 데이터가 구축된 Supabase 프로젝트가 필요합니다. 각 모듈의 환경변수와 실행 방법은 아래 문서에서 확인할 수 있습니다.
 
-```env
-GEMINI_API_KEY=
-SUPABASE_URL=
-SUPABASE_KEY=
-FRONTEND_ORIGINS=http://localhost:5173,http://127.0.0.1:5173
-```
+- [백엔드 실행 및 요청 제한](backend/README.md)
+- [검색 파이프라인과 DB 구성](pipeline/README.md)
+- [프론트엔드 환경 설정](frontend/README.md)
 
-백엔드와 프론트엔드를 실행합니다.
-
-```bash
-uvicorn backend.api:app --host 0.0.0.0 --port 8000
-
-cd frontend
-npm install
-test -f .env.local || cp .env.example .env.local
-npm run dev -- --host 127.0.0.1 --port 5173
-```
-
-`frontend/.env.local`에는 공개용 Supabase 설정과 `VITE_API_BASE_URL=http://127.0.0.1:8000`을 입력합니다. 기존 환경 파일이 있으면 예제로 덮어쓰지 말고 필요한 값만 수정하세요. 환경변수 변경 후에는 개발 서버를 재시작합니다.
-
-검증 명령은 다음과 같습니다.
+저장소 루트에서 백엔드 테스트를 실행하고, 프론트엔드 폴더에서 UI 관련 검증을 실행합니다.
 
 ```bash
 python -m pytest -q
-python -m pipeline.benchmarks.search_latency \
-  pipeline/tests/intent_analysis_results.json \
-  pipeline/tests/simple_test/simple_test_results_gemini.json \
-  pipeline/tests/simple_test/image_test_results_gemini.json \
-  --expected-count 54 \
-  --strict-count \
-  --dry-run
-
 cd frontend
+npm ci
+npm test
 npm run lint
 npm run build
 ```
-
-## 참고 자료
-
-- 정량 결과는 102개 질의의 Top-1 결과를 수동 판정한 프로젝트 내부 평가입니다. 자동 벤치마크나 통계적 유의성 검증 결과는 아닙니다.
-- 로컬 검색에는 Gemini API와 Supabase 프로젝트가 필요합니다.
-- 운영 데모는 Vercel, Cloudtype, Supabase 상태와 사용량 제한의 영향을 받을 수 있습니다.
-- 운영 DB에는 검색에 사용하는 Gemini 이미지·소재 임베딩만 유지합니다. 실험용 벡터 정리 기준은 [pipeline/README.md](pipeline/README.md#운영-db-용량-정책)를 참고하세요.
-- [Reason-before-Retrieve: One-Stage Reflective Chain-of-Thoughts for Training-Free Zero-Shot Composed Image Retrieval (CVPR 2025)](https://openaccess.thecvf.com/content/CVPR2025/html/Tang_Reason-before-Retrieve_One-Stage_Reflective_Chain-of-Thoughts_for_Training-Free_Zero-Shot_Composed_Image_Retrieval_CVPR_2025_paper.html)

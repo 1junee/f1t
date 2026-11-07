@@ -56,12 +56,6 @@ type RecentSearchItem = {
   baselineSearchResponse?: BaselineSearchResponse
 }
 
-type ReasoningBadge = {
-  label: string
-  title: string
-  tone: 'neutral' | 'warning' | 'fallback'
-}
-
 type ModalPageId = 'about'
 type NavItemId = 'home' | ModalPageId
 
@@ -154,101 +148,6 @@ function handleImageFallback(event: SyntheticEvent<HTMLImageElement>) {
   image.src = fallbackSrc
 }
 
-function _warningBelongsTo(code: string): string {
-  if (code.startsWith('gemini_')) return 'gemini'
-  if (code.startsWith('openai_')) return 'openai'
-  if (code.startsWith('qwen_')) return 'qwen'
-  return 'unknown'
-}
-
-function getReasoningBadges(
-  reasoning?: BaselineSearchResponse['reasoning'],
-  providerModels: ProviderModels = {},
-  selectedProvider = 'gemini',
-) {
-  if (!reasoning) {
-    return []
-  }
-
-  // qwen 선택 시 Gemini/OpenAI 관련 경고는 표시하지 않음
-  const isLocalProvider = selectedProvider === 'qwen'
-  const badges: ReasoningBadge[] = (reasoning.warnings ?? [])
-    .filter((warning) => {
-      if (!isLocalProvider) return true
-      const belongs = _warningBelongsTo(warning.code)
-      return belongs !== 'gemini' && belongs !== 'openai'
-    })
-    .map((warning) => ({
-      label: warning.label,
-      title: warning.message,
-      tone: 'warning' as const,
-    }))
-
-  const providerLabel = reasoning.provider
-    ? (providerModels[reasoning.provider] ?? reasoning.provider)
-    : null
-
-  if (providerLabel && (reasoning.status === 'ok' || reasoning.status === 'fallback')) {
-    badges.push({
-      label: providerLabel,
-      title: reasoning.status === 'fallback'
-        ? `${providerLabel}로 fallback 처리했습니다.`
-        : `${providerLabel}로 요청을 해석했습니다.`,
-      tone: reasoning.status === 'fallback' ? 'fallback' as const : 'neutral' as const,
-    })
-  }
-
-  if (reasoning.provider === 'raw_query') {
-    badges.push({
-      label: '원문 fallback',
-      title: '모델 해석을 건너뛰고 입력 문장으로 검색했습니다.',
-      tone: 'fallback' as const,
-    })
-  }
-
-  const seen = new Set<string>()
-  return badges.filter((badge) => {
-    if (seen.has(badge.label)) {
-      return false
-    }
-
-    seen.add(badge.label)
-    return true
-  })
-}
-
-function getReasoningBadgeClass(tone: 'neutral' | 'warning' | 'fallback') {
-  if (tone === 'warning') {
-    return 'border-amber-200 bg-amber-50 text-amber-700'
-  }
-
-  if (tone === 'fallback') {
-    return 'border-sky-200 bg-sky-50 text-sky-700'
-  }
-
-  return 'border-slate-200 bg-white text-slate-500'
-}
-
-function getSearchModeLabel(
-  mode?: string,
-  pipeline?: BaselineSearchResponse['pipeline'],
-  fallbackLabel?: string,
-) {
-  if (pipeline?.label) {
-    return pipeline.label
-  }
-
-  if (mode === 'supabase_vector') {
-    return 'Vector 검색'
-  }
-
-  if (mode === 'baseline') {
-    return 'Baseline 검색'
-  }
-
-  return fallbackLabel ?? '상품 결과'
-}
-
 const attributeDisplayLabels: Record<string, string> = {
   sleeve: '소매',
   length: '기장',
@@ -260,12 +159,6 @@ const attributeDisplayLabels: Record<string, string> = {
   thickness: '두께',
   fit: '핏',
   fabric: '소재',
-}
-
-const intentDisplayLabels: Record<string, string> = {
-  attribute: '속성 검색',
-  attribute_with_tpo_context: 'TPO 포함 속성 검색',
-  abstract_tpo: 'TPO 검색',
 }
 
 function getParsedAttributeItems(pipeline?: BaselineSearchResponse['pipeline']) {
@@ -329,14 +222,13 @@ function AboutPage() {
 
       <div className="mt-8 rounded-xl border border-slate-200 bg-slate-50 p-6">
         <h2 className="text-lg font-semibold text-slate-950">
-          키워드가 아니라 의도를 찾습니다
+          키워드에 담긴 조건과 원하는 스타일을 함께 살펴봅니다
         </h2>
         <p className="mt-3 text-sm leading-6 text-slate-500">
-          먼저 문장에서 직접 언급한 카테고리, 색상, 핏, 소재 등의 조건으로
-          검색 범위를 좁힙니다. 그다음 이미지와 문장의 의미를 상품 특징과
-          비교해 최종 순위를 정합니다. 참고 이미지와 문장이 다를 때는
-          사용자가 말로 지정한 조건을 우선해 원하는 변화가 결과에 반영되도록
-          설계했습니다.
+          “검은색”, “여유 있는 핏”처럼 구체적인 조건과 “출근할 때 입을 옷”처럼
+          상황을 설명하는 문장을 함께 참고합니다. 사진을 첨부하면 이미지의
+          특징도 반영해 가까운 상품을 찾습니다. 사진과 다른 조건을 문장으로
+          요청하면, 말로 지정한 조건을 우선하도록 설계했습니다.
         </p>
       </div>
     </section>
@@ -541,25 +433,16 @@ function App() {
   const hasSubmittedSearch = isBaselineSearch || Boolean(submittedQuery) || submittedHadImage
   // 대화상자 하나를 기준으로 초점 관리 effect가 동작하도록 화면 상태를 이름으로 정리한다.
   const activeDialog = selectedProductForDetail ? 'product' : activeModal ? 'about' : isSidebarOpen ? 'drawer' : null
-  const reasoningBadges = useMemo(
-    () => getReasoningBadges(baselineSearchResponse?.reasoning, providerModels, selectedProvider),
-    [baselineSearchResponse?.reasoning, providerModels, selectedProvider],
-  )
   const parsedAttributeItems = useMemo(
     () => getParsedAttributeItems(baselineSearchResponse?.pipeline),
     [baselineSearchResponse?.pipeline],
   )
-  const pipelineIntentLabel = baselineSearchResponse?.pipeline?.intent_type
-    ? intentDisplayLabels[baselineSearchResponse.pipeline.intent_type] ??
-      baselineSearchResponse.pipeline.intent_type
-    : ''
-  const detailTargetDescription =
-    baselineSearchResponse?.pipeline?.detail_target_description ?? ''
-  const shouldShowPipelineExtraction =
-    isBaselineSearch &&
-    (parsedAttributeItems.length > 0 ||
-      Boolean(detailTargetDescription) ||
-      Boolean(pipelineIntentLabel))
+  // 내부 모델명과 경고 코드는 API에 남기되, 고객에게는 검색 품질에 영향을 주는 상태만 안내한다.
+  const searchInterpretationLimited = Boolean(
+    baselineSearchResponse?.reasoning &&
+    (['fallback', 'degraded'].includes(baselineSearchResponse.reasoning.status) ||
+      baselineSearchResponse.reasoning.provider === 'raw_query'),
+  )
 
   // 첫 진입 때 서버를 준비하고, 모델 선택 메뉴에 표시할 서버 설정의 모델명을 조회한다.
   useEffect(() => {
@@ -1452,24 +1335,20 @@ function App() {
 
         <section ref={resultsSectionRef} className="f1t-results" aria-labelledby="results-heading">
           <div className="f1t-results-heading">
-            <div><p className="f1t-eyebrow">{hasSubmittedSearch ? 'YOUR EDIT' : 'THE COLLECTION'}</p><h2 id="results-heading">{errorMessage && hasSubmittedSearch ? '검색을 완료하지 못했어요' : hasSubmittedSearch ? '당신이 찾던 스타일' : activeCategory.isAll ? '지금, 눈여겨볼 옷' : activeCategory.label}</h2></div>
+            {/* 화면에서는 상품 수만 표시하고, 보조 기기에는 목록 제목을 제공한다. */}
+            <h2 id="results-heading" className="f1t-sr-only">{hasSubmittedSearch ? '검색 결과' : '상품 목록'}</h2>
             <span className="f1t-result-count">{isBaselineSearch ? `${baselineResults.length.toLocaleString('ko-KR')}개 상품` : totalProductCount !== null ? `${totalProductCount.toLocaleString('ko-KR')}개 상품` : isLoading ? '불러오는 중' : ''}</span>
           </div>
 
           {requestSummaryItems.length > 0 && <div className="f1t-request-summary">{requestSummaryItems.map((item) => <span key={item}>{item}</span>)}</div>}
 
-          {isBaselineSearch && (baselineSearchResponse?.recommendation_reason || shouldShowPipelineExtraction || baselineSearchResponse?.target_description) && (
+          {isBaselineSearch && (baselineSearchResponse?.recommendation_reason || parsedAttributeItems.length > 0 || searchInterpretationLimited) && (
             <details className="f1t-search-details">
               <summary>검색 조건과 추천 이유 살펴보기 <span aria-hidden="true">+</span></summary>
               <div className="f1t-details-body">
                 {baselineSearchResponse?.recommendation_reason && <p className="f1t-recommendation-copy">{baselineSearchResponse.recommendation_reason}</p>}
                 {parsedAttributeItems.length > 0 && <div className="f1t-attribute-list">{parsedAttributeItems.map((item) => <span key={item.key}><b>{item.label}</b> {item.value}</span>)}</div>}
-                <p className="f1t-detail-copy">{getSearchModeLabel(baselineSearchResponse?.mode, baselineSearchResponse?.pipeline)}</p>
-                {pipelineIntentLabel && <p className="f1t-detail-label">{pipelineIntentLabel}</p>}
-                {detailTargetDescription && <p className="f1t-detail-copy">{detailTargetDescription}</p>}
-                {baselineSearchResponse?.target_description && <div className="f1t-description-detail"><span>검색용 설명문</span><p>{baselineSearchResponse.target_description_ko || baselineSearchResponse.target_description}</p><p lang="en">{baselineSearchResponse.target_description}</p></div>}
-                <div className="f1t-model-badges">{reasoningBadges.map((badge) => <span key={badge.label} title={badge.title} className={getReasoningBadgeClass(badge.tone)}>{badge.label}</span>)}</div>
-                {baselineResults.length > 0 && <p className="f1t-detail-copy">유사도 점수 · {baselineResults.map((result) => `${result.rank}위 ${result.similarity.toFixed(3)}`).join(' / ')}</p>}
+                {searchInterpretationLimited && <p className="f1t-detail-copy" role="status">요청을 해석하는 일부 기능을 이용하지 못해 대체 방식으로 검색했어요. 원하는 조건이 결과에 반영됐는지 확인해주세요.</p>}
               </div>
             </details>
           )}
@@ -1486,7 +1365,7 @@ function App() {
             </div>
           )}
 
-          {!isBaselineSearch && isLoading && products.length === 0 && <div className="f1t-product-grid" aria-label="상품 불러오는 중">{Array.from({ length: 8 }).map((_, index) => <div className="f1t-product-skeleton" key={index}><div /><span /><span /></div>)}</div>}
+          {!isBaselineSearch && isLoading && products.length === 0 && <div className="f1t-product-grid" aria-label="상품 불러오는 중">{Array.from({ length: 12 }).map((_, index) => <div className="f1t-product-skeleton" key={index}><div /><span /><span /></div>)}</div>}
 
           {displayItems.length > 0 && <div className={`f1t-product-grid ${isLoading && !isBaselineSearch ? 'is-refreshing' : ''}`}>
             {displayItems.map(({ product, imageUrl, key, rank }) => {
