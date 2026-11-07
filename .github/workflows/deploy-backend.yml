@@ -1,0 +1,96 @@
+name: Deploy backend to Cloudtype
+
+on:
+  push:
+    branches: [main]
+    # 프론트만 바뀐 경우에는 Vercel만 배포하고 백엔드는 유지합니다.
+    paths:
+      - "backend/**"
+      - "pipeline/**"
+      - "tests/**"
+      - "pytest.ini"
+      - "Dockerfile"
+      - ".dockerignore"
+      - ".github/workflows/deploy-backend.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cloudtype-f1t-be-main
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    # 포크나 다른 브랜치의 수동 실행으로 운영 서버가 바뀌지 않게 제한합니다.
+    if: github.repository == '1junee/f1t' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Check deployment secrets
+        env:
+          CLOUDTYPE_TOKEN: ${{ secrets.CLOUDTYPE_TOKEN }}
+          GHP_TOKEN: ${{ secrets.GHP_TOKEN }}
+        run: |
+          test -n "$CLOUDTYPE_TOKEN" || { echo "::error::CLOUDTYPE_TOKEN is missing"; exit 1; }
+          test -n "$GHP_TOKEN" || { echo "::error::GHP_TOKEN is missing"; exit 1; }
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+      - name: Test backend before deployment
+        run: |
+          pip install -r backend/requirements.txt pytest
+          python -m pytest -q
+
+      - name: Connect read-only deploy key
+        uses: cloudtype-github-actions/connect@d78b2c8e36a7f51f8d2437a11839df14cde330f9 # v1
+        with:
+          token: ${{ secrets.CLOUDTYPE_TOKEN }}
+          ghtoken: ${{ secrets.GHP_TOKEN }}
+          endpoint: https://app.cloudtype.io/api
+          scope: heodnjswns40
+          readOnly: "true"
+
+      - name: Deploy backend
+        uses: cloudtype-github-actions/deploy@43cf563907c5451c12ecc4461bdbf02e61528d1d # v1
+        with:
+          token: ${{ secrets.CLOUDTYPE_TOKEN }}
+          endpoint: https://app.cloudtype.io/api
+          project: heodnjswns40/f1t
+          stage: main
+          # Cloudtype CLI의 현재 설정입니다. 환경변수 변경 시 이 부분도 맞춰 주세요.
+          # secret은 Cloudtype 시크릿 이름이며 실제 API 키를 적는 곳이 아닙니다.
+          yaml: |
+            name: f1t-be
+            app: dockerfile
+            options:
+              env:
+                - name: GEMINI_API_KEY
+                  secret: GEMINI_API_KEY
+                - name: SUPABASE_URL
+                  value: https://gsyspkgeaomvsoimitzm.supabase.co
+                - name: SUPABASE_KEY
+                  secret: SUPABASE_KEY
+                - name: FRONTEND_ORIGINS
+                  value: https://f1t-alpha.vercel.app
+                - name: MODEL_MAX_CONCURRENT_REQUESTS
+                  value: "2"
+                - name: MODEL_REQUESTS_PER_MINUTE
+                  value: "10"
+                - name: MODEL_REQUESTS_PER_DAY
+                  value: "100"
+              args: []
+              ports: "8000"
+            context:
+              git:
+                url: git@github.com:${{ github.repository }}.git
+                ref: ${{ github.sha }}
