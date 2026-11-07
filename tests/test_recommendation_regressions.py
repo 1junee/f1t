@@ -144,7 +144,17 @@ def test_search_passes_same_plan_scope_to_strict_and_rpc(monkeypatch, strict_row
         recommendation_reason="추천 설명", to_metadata=lambda: {},
     ))
     scope = dict(table_filter="musinsa_pants", category2_filter="데님 팬츠", category2_keyword_filter="팬츠")
-    pipeline.search("여름 바지", **scope)
+    _, _, metadata, _ = pipeline.search("여름 바지", **scope)
+    timing = metadata["pipeline"]["timings"]
+    assert timing["total_ms"] >= 0
+    stages = {stage["id"]: stage for stage in timing["stages"]}
+    assert set(stages) == {
+        "intent_extraction", "target_description", "search_plan", "translation",
+        "embedding", "retrieval", "postprocess", "recommendation_explanation",
+    }
+    assert stages["intent_extraction"]["parallel_group"] == stages["target_description"]["parallel_group"]
+    assert stages["translation"]["parallel_group"] == stages["embedding"]["parallel_group"]
+    assert all(stage["duration_ms"] >= 0 for stage in stages.values())
     for key, expected in scope.items():
         assert fetch.call_args.kwargs.get(key) == expected
     if not strict_rows:

@@ -47,7 +47,13 @@ export type BaselineReasoningMetadata = {
   pipeline?: SearchPipelineMetadata
 }
 
+export type SearchTimings = {
+  total_ms: number
+  stages: { id: string; label: string; duration_ms: number; parallel_group?: string }[]
+}
+
 export type SearchPipelineMetadata = {
+  timings?: SearchTimings
   query_type: 'text_only' | 'image_only' | 'text_image' | string
   id: string
   label: string
@@ -73,6 +79,8 @@ export type SearchPipelineMetadata = {
 }
 
 export type BaselineSearchResponse = {
+  // 서버 준비부터 응답 본문 수신까지 브라우저에서 측정하며 최근 검색에도 저장한다.
+  client_elapsed_ms?: number
   // results는 상품 카드에 사용한다. 검색 상세에는 조건·추천 이유만 표시하고 기술 메타데이터는 응답에 보존한다.
   mode: 'baseline' | 'supabase_vector' | string
   provider: string
@@ -197,6 +205,7 @@ export async function searchBaseline({
     throw new Error('VITE_API_BASE_URL is not configured.')
   }
 
+  const startedAt = performance.now()
   await warmBaselineSearch()
 
   const trimmedQuery = query.trim()
@@ -283,5 +292,6 @@ export async function searchBaseline({
   }
 
   // as는 TypeScript의 타입 단언이다. 서버 JSON의 필드 구조를 런타임에 검증하지는 않는다.
-  return (await response.json()) as BaselineSearchResponse
+  const result = (await response.json()) as BaselineSearchResponse
+  return { ...result, client_elapsed_ms: performance.now() - startedAt }
 }

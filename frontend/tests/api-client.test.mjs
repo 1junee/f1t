@@ -101,3 +101,26 @@ test('count 헤더가 없으면 현재 페이지 크기를 전체 상품 수로 
   const result = await api.fetchProducts({ table: 'musinsa_pants', offset: 20, limit: 1 })
   assert.equal(result.totalCount, null)
 })
+
+
+test('전체 검색 시간은 서버 준비·재시도·JSON 수신을 모두 포함한다', async () => {
+  let now = 0
+  let attempts = 0
+  const api = loadModule('lib/baselineSearch.ts', { globals: {
+    performance: { now: () => now },
+    fetch: async (url) => {
+      if (url.endsWith('/health')) { now += 100; return new Response('') }
+      now += 200
+      if (++attempts === 1) return new Response('', { status: 503 })
+      return { ok: true, status: 200, json: async () => {
+        now += 50
+        return { results: [], pipeline: { timings: { total_ms: 180, stages: [] } } }
+      } }
+    },
+  } })
+  const result = await api.searchBaseline({ query: '셔츠' })
+  assert.equal(result.client_elapsed_ms, 550)
+  assert.equal(result.pipeline.timings.total_ms, 180, '서버 측정값을 클라이언트 시간으로 덮지 않는다')
+  const second = await api.searchBaseline({ query: '바지' })
+  assert.equal(second.client_elapsed_ms, 250, '다음 요청은 시간을 새로 측정한다')
+})

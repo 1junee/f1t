@@ -146,3 +146,32 @@ test('최근 검색을 복원하면 결과와 함께 검색 당시 카테고리 
   assert.match(text(app.node((node) => node.props.className === 'f1t-request-summary')), /상의/)
   assert.match(text(app.node((node) => node.type === 'article')), /top-result/)
 })
+
+
+test('검색 완료 시간과 병렬 단계 시간을 표시하고 홈 이동 시 지운다', async () => {
+  const app = createAppHarness({ search: async () => ({
+    ...response('timed'), client_elapsed_ms: 1250,
+    pipeline: { timings: { total_ms: 1100, stages: [
+      { id: 'intent', label: '검색 의도·조건 해석', duration_ms: 800, parallel_group: 'analysis' },
+      { id: 'description', label: '목표 상품 설명 생성', duration_ms: 900, parallel_group: 'analysis' },
+    ] } },
+  }) })
+  await app.submit('검은 셔츠')
+  const timing = app.node((node) => node.props.className === 'f1t-search-timing')
+  assert.match(text(timing), /1.25초.*검색 완료/)
+  assert.match(text(timing), /서버 처리 1.10초/)
+  assert.match(text(timing), /검색 의도·조건 해석병렬 ①0.80초/)
+  assert.match(text(timing), /목표 상품 설명 생성병렬 ①0.90초/)
+  assert.match(text(timing), /단계별 시간의 합과 전체 시간이 다릅니다/)
+  app.node((node) => node.props['aria-label'] === 'F1T 홈').props.onClick()
+  app.render()
+  assert.equal(app.nodes((node) => node.props.className === 'f1t-search-timing').length, 0)
+})
+
+test('이전 서버의 응답도 전체 시간만 표시하고 정상 처리한다', async () => {
+  const app = createAppHarness({ search: async () => ({ ...response('legacy'), client_elapsed_ms: 2200 }) })
+  await app.submit('셔츠')
+  const timing = text(app.node((node) => node.props.className === 'f1t-search-timing'))
+  assert.match(timing, /2.20초/)
+  assert.match(timing, /단계별 시간 정보는 제공되지/)
+})

@@ -13,6 +13,7 @@ from typing import Any
 import numpy as np
 
 from .env import load_pipeline_env
+from .timing import SearchTimings
 from .intent.intent_extraction import extract_conservative_metadata
 from .retrieval.candidate_selection import (
     build_attribute_text_search_plan,
@@ -156,6 +157,7 @@ class FashionRecommendationPipeline:
         provider: str | None = None,
         pipeline_method: str = DEFAULT_PIPELINE_METHOD,
     ) -> tuple[str, str, dict[str, Any], list[dict[str, Any]]]:
+        timings = SearchTimings()
         requested_pipeline = pipeline_method.lower().strip() or DEFAULT_PIPELINE_METHOD
         if requested_pipeline not in {"attribute_text", "metadata", "intent"}:
             raise ValueError("pipeline_method must be intent.")
@@ -171,12 +173,16 @@ class FashionRecommendationPipeline:
         # 외부 API의 응답 대기를 겹치는 구조이며, CPU 계산의 속도가 자동으로 두 배가 되는 것은 아니다.
         with ThreadPoolExecutor(max_workers=2) as executor:
             intent_future = executor.submit(
+                timings.run,
+                "intent_extraction", "검색 의도·조건 해석", "analysis",
                 extract_conservative_metadata,
                 query=query,
                 image_bytes=image_bytes,
                 image_mime_type=image_mime_type,
             )
             reasoning_future = executor.submit(
+                timings.run,
+                "target_description", "목표 상품 설명 생성", "analysis",
                 self._run_target_description_reasoning,
                 query=query,
                 raw_fallback=raw_fallback,
@@ -191,22 +197,24 @@ class FashionRecommendationPipeline:
             )
 
         # 추출 속성으로 검색할 테이블·필터·후보 수를 정한다. 아직 DB를 조회하지 않는다.
-        attribute_plan = build_attribute_text_search_plan(
-            query=query,
-            top_k=top_k,
-            has_image=bool(image_bytes),
-            extracted_attributes=(
-                intent_extraction.attributes
-                if intent_extraction and intent_extraction.status == "ok"
-                else None
-            ),
-            extraction_metadata=(
-                intent_extraction.to_metadata() if intent_extraction else None
-            ),
-            table_filter=table_filter,
-            category2_filter=category2_filter,
-            category2_keyword_filter=category2_keyword_filter,
-        )
+        with timings.stage("search_plan", "검색 조건 구성"):
+            attribute_plan = build_attribute_text_search_plan(
+                query=query,
+                top_k=top_k,
+                has_image=bool(image_bytes),
+                extracted_attributes=(
+                    intent_extraction.attributes
+                    if intent_extraction and intent_extraction.status == "ok"
+                    else None
+                ),
+                extraction_metadata=(
+                    intent_extraction.to_metadata() if intent_extraction else None
+                ),
+                table_filter=table_filter,
+                category2_filter=category2_filter,
+                category2_keyword_filter=category2_keyword_filter,
+            )
+
         pipeline_metadata = attribute_plan.to_dict()
         pipeline_metadata["parallel_execution"] = {
             "intent_and_target_description": True,
@@ -234,16 +242,23 @@ class FashionRecommendationPipeline:
         # 화면용 번역, 검색용 설명 임베딩, 선택적 소재 임베딩도 서로 독립적인 작업이다.
         with ThreadPoolExecutor(max_workers=3) as executor:
             translation_future = executor.submit(
+                timings.run,
+                "translation", "설명문 번역", "encoding",
                 self._translate,
                 target_description,
                 "Korean",
             )
             embedding_future = executor.submit(
+                timings.run,
+                "embedding", "검색 문장 임베딩", "encoding",
                 self.retriever.encode_text,
                 [retrieval_description],
             )
             fabric_future = (
-                executor.submit(self.retriever.encode_text, [fabric_text])
+                executor.submit(
+                    timings.run, "fabric_embedding", "소재 조건 임베딩", "encoding",
+                    self.retriever.encode_text, [fabric_text],
+                )
                 if fabric_text
                 else None
             )
@@ -255,80 +270,85 @@ class FashionRecommendationPipeline:
                 fabric_future.result()[0].tolist() if fabric_future else None
             )
 
-        active_table_filter = attribute_plan.table_filter
-        active_category2_filter = attribute_plan.category2_filter
-        active_category2_keyword_filter = attribute_plan.category2_keyword_filter
-        match_count = attribute_plan.prefetch_count
-        # None은 아직 유효한 검색 경로의 결과를 얻지 못했다는 표식으로 RPC 전환 여부를 결정한다.
-        results = None
-        # 정확한 속성 조건이 있으면 후보와 저장 벡터를 받아 Python에서 직접 순위를 계산한다.
-        if _has_exact_metadata_filters(attribute_plan.parsed_attributes.to_dict()):
-            try:
-                strict_candidates = retrieve_candidates(
-                    attribute_plan.parsed_attributes.to_dict(),
-                    include_embeddings=True,
+        with timings.stage("retrieval", "상품 조회·유사도 검색"):
+            active_table_filter = attribute_plan.table_filter
+            active_category2_filter = attribute_plan.category2_filter
+            active_category2_keyword_filter = attribute_plan.category2_keyword_filter
+            match_count = attribute_plan.prefetch_count
+            # None은 아직 유효한 검색 경로의 결과를 얻지 못했다는 표식으로 RPC 전환 여부를 결정한다.
+            results = None
+            # 정확한 속성 조건이 있으면 후보와 저장 벡터를 받아 Python에서 직접 순위를 계산한다.
+            if _has_exact_metadata_filters(attribute_plan.parsed_attributes.to_dict()):
+                try:
+                    strict_candidates = retrieve_candidates(
+                        attribute_plan.parsed_attributes.to_dict(),
+                        include_embeddings=True,
+                        table_filter=active_table_filter,
+                        category2_filter=active_category2_filter,
+                        category2_keyword_filter=active_category2_keyword_filter,
+                    )
+                    if strict_candidates:
+                        results = _rank_stored_gemini_vectors(
+                            embedding=query_embedding,
+                            rows=strict_candidates,
+                            top_k=top_k,
+                            fabric_embedding=fabric_embedding,
+                        )
+                        pipeline_metadata["candidate_selection"] = {
+                            "status": "applied",
+                            "strategy": "intent_rest_prefilter_then_local_gemini_vector_rank",
+                            "strict_candidate_count": len(strict_candidates),
+                            "uses_stored_image_embeddings": True,
+                            "fabric_weighted": fabric_embedding is not None,
+                        }
+                    else:
+                        pipeline_metadata["candidate_selection"] = {
+                            "status": "fallback_no_strict_candidates",
+                            "strategy": "rpc_vector_search",
+                            "strict_candidate_count": 0,
+                        }
+                except Exception:
+                    logger.exception("Intent-based candidate prefilter failed")
+                    pipeline_metadata["candidate_selection"] = {
+                        "status": "fallback_prefilter_error",
+                        "strategy": "rpc_vector_search",
+                        "error_code": "candidate_prefilter_failed",
+                    }
+
+            # 조건이 없거나 후보 조회가 비었거나 실패했으면 DB의 벡터 검색 RPC를 사용한다.
+            if results is None:
+                results = self._search_vectors(
+                    embedding=query_embedding,
+                    match_count=match_count,
                     table_filter=active_table_filter,
                     category2_filter=active_category2_filter,
                     category2_keyword_filter=active_category2_keyword_filter,
+                    fabric_embedding=fabric_embedding,
                 )
-                if strict_candidates:
-                    results = _rank_stored_gemini_vectors(
-                        embedding=query_embedding,
-                        rows=strict_candidates,
-                        top_k=top_k,
-                        fabric_embedding=fabric_embedding,
-                    )
-                    pipeline_metadata["candidate_selection"] = {
-                        "status": "applied",
-                        "strategy": "intent_rest_prefilter_then_local_gemini_vector_rank",
-                        "strict_candidate_count": len(strict_candidates),
-                        "uses_stored_image_embeddings": True,
-                        "fabric_weighted": fabric_embedding is not None,
-                    }
-                else:
-                    pipeline_metadata["candidate_selection"] = {
-                        "status": "fallback_no_strict_candidates",
-                        "strategy": "rpc_vector_search",
-                        "strict_candidate_count": 0,
-                    }
-            except Exception:
-                logger.exception("Intent-based candidate prefilter failed")
-                pipeline_metadata["candidate_selection"] = {
-                    "status": "fallback_prefilter_error",
-                    "strategy": "rpc_vector_search",
-                    "error_code": "candidate_prefilter_failed",
-                }
-
-        # 조건이 없거나 후보 조회가 비었거나 실패했으면 DB의 벡터 검색 RPC를 사용한다.
-        if results is None:
-            results = self._search_vectors(
-                embedding=query_embedding,
-                match_count=match_count,
-                table_filter=active_table_filter,
-                category2_filter=active_category2_filter,
-                category2_keyword_filter=active_category2_keyword_filter,
-                fabric_embedding=fabric_embedding,
-            )
 
         # 두 검색 경로의 결과에 동일한 후처리를 적용하고 최종 top_k개를 정한다.
-        results, result_strategy = refine_attribute_text_results(
-            results,
-            attribute_plan.parsed_attributes,
-            top_k,
-        )
+        with timings.stage("postprocess", "결과 정렬·선별"):
+            results, result_strategy = refine_attribute_text_results(
+                results,
+                attribute_plan.parsed_attributes,
+                top_k,
+            )
+
         pipeline_metadata["result_strategy"] = result_strategy
 
         pipeline_metadata["stages"] = INTENT_RECOMMENDATION_STAGES
         pipeline_metadata["recommendation_count"] = top_k
         # 현재 설명은 요청·추출 속성·목표 설명을 요약한다. 개별 반환 상품 행은 전달하지 않는다.
-        recommendation_explanation = generate_query_recommendation_explanation(
-            query=query,
-            parsed_attributes=pipeline_metadata.get("parsed_attributes"),
-            target_description_ko=target_description_ko,
-            detail_target_description=pipeline_metadata.get("detail_target_description"),
-            target_description_reasoning=reasoning_result,
-            has_reference_image=bool(image_bytes),
-        )
+        with timings.stage("recommendation_explanation", "추천 이유 작성"):
+            recommendation_explanation = generate_query_recommendation_explanation(
+                query=query,
+                parsed_attributes=pipeline_metadata.get("parsed_attributes"),
+                target_description_ko=target_description_ko,
+                detail_target_description=pipeline_metadata.get("detail_target_description"),
+                target_description_reasoning=reasoning_result,
+                has_reference_image=bool(image_bytes),
+            )
+
         recommendation_reason = recommendation_explanation.recommendation_reason
 
         metadata = {
@@ -340,6 +360,7 @@ class FashionRecommendationPipeline:
             "recommendation_explanation": recommendation_explanation.to_metadata(),
         }
 
+        pipeline_metadata["timings"] = timings.snapshot()
         return target_description, target_description_ko, metadata, results
 
     # 원본 문장·이미지 → 목표 설명 딕셔너리, 실제 사용 제공자, 상태, 경고 목록.

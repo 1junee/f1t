@@ -1183,3 +1183,35 @@ button:disabled {
     grid-template-columns: repeat(2,minmax(0,1fr));
   }
 }
+
+/* 검색 시간은 결과 바로 위에서 확인하고, 자세한 단계는 필요할 때 펼친다. */
+.f1t-search-timing {
+  margin: 0 0 20px;
+  border-top: 1px solid #dedbd5;
+  border-bottom: 1px solid #dedbd5;
+}
+.f1t-search-timing summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 0;
+  cursor: pointer;
+  list-style: none;
+  font-size: 13px;
+}
+.f1t-search-timing summary::-webkit-details-marker { display: none; }
+.f1t-search-timing summary:focus-visible { outline: 2px solid currentColor; outline-offset: 3px; }
+.f1t-search-timing summary strong { font-variant-numeric: tabular-nums; }
+.f1t-timing-toggle { color: #696762; font-size: 12px; white-space: nowrap; }
+.f1t-search-timing[open] .f1t-timing-toggle > span { display: inline-block; transform: rotate(45deg); }
+.f1t-timing-body { padding: 0 0 16px; }
+.f1t-timing-note { color: #696762; font-size: 12px; line-height: 1.7; margin: 0; }
+.f1t-timing-stages { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 32px; margin: 12px 0; }
+.f1t-timing-stages > div { display: flex; justify-content: space-between; gap: 12px; padding: 10px 0; border-bottom: 1px solid #eeece7; font-size: 12px; }
+.f1t-timing-stages dt { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.f1t-timing-stages dd { margin: 0; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.f1t-timing-parallel { color: #77736c; font-size: 10px; border: 1px solid #dedbd5; padding: 1px 5px; border-radius: 3px; }
+@media (max-width: 760px) {
+  .f1t-timing-stages { grid-template-columns: 1fr; }
+}

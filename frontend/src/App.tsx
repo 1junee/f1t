@@ -429,6 +429,8 @@ function App() {
     return items
   }, [activeCategory.label, submittedHadImage, submittedQuery])
   const baselineResults = baselineSearchResponse?.results ?? []
+  const searchTimings = baselineSearchResponse?.pipeline?.timings
+  const elapsedMs = baselineSearchResponse?.client_elapsed_ms
   const isBaselineSearch = Boolean(baselineSearchResponse)
   const hasSubmittedSearch = isBaselineSearch || Boolean(submittedQuery) || submittedHadImage
   // 대화상자 하나를 기준으로 초점 관리 effect가 동작하도록 화면 상태를 이름으로 정리한다.
@@ -1335,10 +1337,31 @@ function App() {
 
         <section ref={resultsSectionRef} className="f1t-results" aria-labelledby="results-heading">
           <div className="f1t-results-heading">
-            {/* 화면에서는 상품 수만 표시하고, 보조 기기에는 목록 제목을 제공한다. */}
+            {/* 상품 수와 실제 검색 소요 시간을 보여주고, 보조 기기에는 목록 제목을 제공한다. */}
             <h2 id="results-heading" className="f1t-sr-only">{hasSubmittedSearch ? '검색 결과' : '상품 목록'}</h2>
             <span className="f1t-result-count">{isBaselineSearch ? `${baselineResults.length.toLocaleString('ko-KR')}개 상품` : totalProductCount !== null ? `${totalProductCount.toLocaleString('ko-KR')}개 상품` : isLoading ? '불러오는 중' : ''}</span>
           </div>
+
+          {isBaselineSearch && (elapsedMs !== undefined || searchTimings) && (
+            <details className="f1t-search-timing">
+              <summary>
+                <span><strong>{((elapsedMs ?? searchTimings!.total_ms) / 1000).toFixed(2)}초</strong> 만에 검색 완료</span>
+                <span className="f1t-timing-toggle">단계별 시간 <span aria-hidden="true">+</span></span>
+              </summary>
+              <div className="f1t-timing-body">
+                {searchTimings ? <>
+                  <p className="f1t-timing-note">서버 처리 {(searchTimings.total_ms / 1000).toFixed(2)}초 · 전체 시간에는 서버 준비와 네트워크 왕복이 포함됩니다.</p>
+                  <dl className="f1t-timing-stages">
+                    {searchTimings.stages.map((stage) => <div key={stage.id}>
+                      <dt>{stage.label}{stage.parallel_group && <span className="f1t-timing-parallel">{stage.parallel_group === 'analysis' ? '병렬 ①' : '병렬 ②'}</span>}</dt>
+                      <dd>{(stage.duration_ms / 1000).toFixed(2)}초</dd>
+                    </div>)}
+                  </dl>
+                  <p className="f1t-timing-note">같은 병렬 번호의 단계는 동시에 진행되어, 단계별 시간의 합과 전체 시간이 다릅니다.</p>
+                </> : <p className="f1t-timing-note">전체 응답 시간입니다. 이 검색의 단계별 시간 정보는 제공되지 않았어요.</p>}
+              </div>
+            </details>
+          )}
 
           {requestSummaryItems.length > 0 && <div className="f1t-request-summary">{requestSummaryItems.map((item) => <span key={item}>{item}</span>)}</div>}
 

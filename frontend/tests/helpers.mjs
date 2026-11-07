@@ -24,7 +24,7 @@ export function loadModule(entry, { globals = {}, modules = {} } = {}) {
     })
     vm.runInNewContext(outputText, {
       module, exports: module.exports, console, URL, Error, TypeError, AbortController, DOMException, FormData, Response,
-      setTimeout, clearTimeout, window: { setTimeout, clearTimeout }, ...globals,
+      setTimeout, clearTimeout, performance, window: { setTimeout, clearTimeout }, ...globals,
       require(specifier) {
         if (specifier in modules) return modules[specifier]
         if (!specifier.startsWith('.')) throw new Error(`Unexpected test import: ${specifier}`)
