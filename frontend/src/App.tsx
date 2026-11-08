@@ -312,6 +312,8 @@ function App() {
   const [isUnderstandingRequest, setIsUnderstandingRequest] = useState(false)
   const [isSearchCompleteVisible, setIsSearchCompleteVisible] = useState(false)
   const [searchProgressIndex, setSearchProgressIndex] = useState(0)
+  const [searchStartedAt, setSearchStartedAt] = useState<number | null>(null)
+  const [searchElapsedSeconds, setSearchElapsedSeconds] = useState(0)
   const [selectedImage, setSelectedImage] = useState<SelectedImage | null>(null)
   const [isImageDragging, setIsImageDragging] = useState(false)
   const [selectedProvider, setSelectedProvider] = useState('gemini')
@@ -696,6 +698,18 @@ function App() {
     [],
   )
 
+  // 호출 횟수를 세지 않고 실제 경과 시간을 계산해 백그라운드 탭에서도 시간이 밀리지 않게 한다.
+  useEffect(() => {
+    if (!isUnderstandingRequest || searchStartedAt === null) return
+
+    const elapsedInterval = window.setInterval(() => {
+      setSearchElapsedSeconds(Math.floor((performance.now() - searchStartedAt) / 1000))
+    }, 1000)
+
+    // 완료·실패·화면 이동·컴포넌트 제거 시 타이머를 정리한다.
+    return () => window.clearInterval(elapsedInterval)
+  }, [isUnderstandingRequest, searchStartedAt])
+
   // 진행 문구는 타이머로 바뀌는 안내이며, 서버의 실제 단계별 진행률을 받는 것은 아니다.
   useEffect(() => {
     if (!isUnderstandingRequest) {
@@ -1066,6 +1080,8 @@ function App() {
 
     setIsSearchCompleteVisible(false)
     setIsUnderstandingRequest(true)
+    setSearchStartedAt(performance.now())
+    setSearchElapsedSeconds(0)
     setSearchProgressIndex(0)
     const queryText = query.trim()
     const imageFile = selectedImage?.file ?? null
@@ -1322,9 +1338,15 @@ function App() {
               </div>
             )}
             {(isUnderstandingRequest || isSearchCompleteVisible) && (
-              <div className="f1t-search-status" role="status" aria-live="polite">
-                <span className={isUnderstandingRequest ? 'f1t-status-dot is-loading' : 'f1t-status-dot'} />
-                <div><strong>{isSearchCompleteVisible ? '검색이 완료됐어요' : currentSearchProgress.title}</strong><p>{isSearchCompleteVisible ? '아래에서 검색 결과를 확인해보세요.' : currentSearchProgress.description}</p></div>
+              <div className="f1t-search-status">
+                <span className={isUnderstandingRequest ? 'f1t-status-dot is-loading' : 'f1t-status-dot'} aria-hidden="true" />
+                <div className="f1t-search-status-copy">
+                  <div className="f1t-search-status-heading">
+                    <strong role="status" aria-live="polite">{isSearchCompleteVisible ? '검색이 완료됐어요' : currentSearchProgress.title}</strong>
+                    {isUnderstandingRequest && <span className="f1t-search-elapsed" role="timer" aria-label="검색 경과 시간" aria-live="off"><span aria-hidden="true">· </span>{searchElapsedSeconds}초</span>}
+                  </div>
+                  <p>{isSearchCompleteVisible ? '아래에서 검색 결과를 확인해보세요.' : currentSearchProgress.description}</p>
+                </div>
               </div>
             )}
           </div>

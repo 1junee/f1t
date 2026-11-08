@@ -359,6 +359,25 @@ button:disabled {
   padding: 15px 0 0;
 }
 
+/* 상태 문구와 같은 줄에 조용한 초 단위 타이머를 두고 숫자 폭을 고정한다. */
+.f1t-search-status-copy {
+  min-width: 0;
+}
+
+.f1t-search-status-heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 8px;
+}
+
+.f1t-search-elapsed {
+  color: var(--muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
 .f1t-status-dot {
   width: 7px;
   height: 7px;
