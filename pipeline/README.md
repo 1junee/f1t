@@ -63,17 +63,17 @@ API 응답 반환
 - 요청에 fabric 속성이 없으면 이미지 유사도만 사용
 - 요청에 fabric 속성이 있는데 상품의 소재 벡터가 없으면 소재 점수는 0으로 계산
 
-운영 검색의 가중치는 Supabase RPC 함수 `match_fashion_items_filtered_768`과 `match_fashion_items_768`에서 적용합니다. `recommendation_service.py`의 `_rank_stored_gemini_vectors(fabric_weight=0.2)`는 기존 REST 검색을 비교하는 벤치마크용으로 남아 있으며 운영의 정확 필터 경로에서는 호출하지 않습니다.
+운영 검색의 가중치는 Supabase RPC 함수 `filtered_exact_vector_search_768`과 `approximate_vector_search_768`에서 적용합니다. `recommendation_service.py`의 `_rank_stored_gemini_vectors(fabric_weight=0.2)`는 기존 REST 검색을 비교하는 벤치마크용으로 남아 있으며 운영의 정확 필터 경로에서는 호출하지 않습니다.
 
 ### 실제 검색 경로
 
 `recommendation_service.py`는 모든 요청을 같은 방식으로 검색하지 않습니다.
 
-1. 소매·기장·계절·핏처럼 정확한 속성이 있으면 `search_filtered()`가 `match_fashion_items_filtered_768` RPC를 한 번 호출합니다. 영어 속성값은 기존 매핑으로 DB 저장값에 맞춥니다.
+1. 소매·기장·계절·핏처럼 정확한 속성이 있으면 `search_filtered_exact()`가 `filtered_exact_vector_search_768` RPC를 한 번 호출합니다. 영어 속성값은 기존 매핑으로 DB 저장값에 맞춥니다.
 2. DB는 테이블·세부 카테고리·속성 조건을 적용하고, 일치하는 전체 후보의 정확 코사인 점수를 계산해 상위 상품만 반환합니다. ID순 첫 1,000개 제한이나 후보 벡터 다운로드는 없습니다. 소재 조건이 있으면 동일한 80:20 가중 점수로 정렬합니다.
 3. 색상과 소재는 정확 필터가 아니라 검색 설명문과 벡터 점수로 반영합니다. 성별 `unisex`는 남성·여성 모두 포함, 나머지 배열 속성은 하나 이상 일치 조건을 유지합니다.
-4. 정확 조건이 없거나 일치 후보가 0개일 때 기존 `match_fashion_items_768` HNSW RPC를 사용합니다. 새 RPC 설치 누락이나 조회 장애는 검색 오류로 반환하며, 조용히 조건을 완화하지 않습니다.
-5. 기존 HNSW 경로에서 테이블 조건이 없으면 세 상품 테이블을 순차 검색한 뒤 결과를 합칩니다. 새 정확 필터 RPC는 지정 범위가 없을 때 적용 가능한 테이블의 일치 후보를 함께 비교합니다.
+4. 정확 조건이 없거나 일치 후보가 0개일 때 기존 `approximate_vector_search_768` HNSW RPC를 사용합니다. 새 RPC 설치 누락이나 조회 장애는 검색 오류로 반환하며, 조용히 조건을 완화하지 않습니다.
+5. 근사 검색은 테이블 조건 유무와 관계없이 RPC를 한 번 호출합니다. 범위가 없으면 DB가 세 상품 테이블의 후보를 합쳐 정렬합니다. 정상 0건은 빈 목록, DB 장애는 예외로 전달합니다. 이전 3회 순차 호출·서버 병합은 `benchmarks/retrieval_request_comparison.py`의 `search_three_requests_legacy()`에 비교 실험용으로 보존했습니다. 새 정확 필터 RPC는 지정 범위가 없을 때 적용 가능한 테이블의 일치 후보를 함께 비교합니다.
 
 `pipeline.retrieval_diagnostics.matched_count`는 DB가 필터링한 전체 후보 수이며 반환 상품 수와 다릅니다. 아래의 HNSW 50~100개는 **기존 RPC가 이미지 벡터로 고른 뒤 재정렬하는 후보 수**로, 새 정확 필터 RPC에 적용되는 제한이 아닙니다.
 
@@ -198,20 +198,20 @@ perform set_config('hnsw.ef_search', '100', true);
 | `candidate_count` | 이미지 HNSW에서 받아 재정렬할 후보 수 | 50 |
 | `hnsw.ef_search` | HNSW가 내부에서 유지하며 탐색하는 후보 폭 | 100 |
 
-즉, “가까운 후보 50~100개”는 HNSW의 보편적인 고정값이 아니라 **`match_fashion_items_768` 함수에 명시한 프로젝트 정책**입니다. 요청 결과 수의 5배를 후보로 가져오되 최소 50개, 최대 100개로 제한합니다. 그 후보에 소재 조건이 있으면 이미지 80%와 소재 20%로 다시 점수를 매기고, 최종 `result_count`개만 반환합니다.
+즉, “가까운 후보 50~100개”는 HNSW의 보편적인 고정값이 아니라 **`approximate_vector_search_768` 함수에 명시한 프로젝트 정책**입니다. 요청 결과 수의 5배를 후보로 가져오되 최소 50개, 최대 100개로 제한합니다. 그 후보에 소재 조건이 있으면 이미지 80%와 소재 20%로 다시 점수를 매기고, 최종 `result_count`개만 반환합니다.
 
 HNSW 경로에서 소재 벡터는 이미지 HNSW가 고른 후보 집합을 재정렬하는 데 사용합니다. 정확 필터 경로에서는 전체 일치 후보의 이미지·소재 점수를 함께 계산합니다. 두 경로 모두 별도의 소재 HNSW 인덱스를 사용하지 않습니다.
 
 > `candidate_count`와 `ef_search`는 다른 값입니다. 전자는 SQL이 재정렬할 행 수이고, 후자는 HNSW 내부 탐색 폭입니다. `candidate_count`만 크게 잡고 `ef_search`가 작으면 실제 후보가 기대보다 적을 수 있으므로, RPC는 요청 안에서 `ef_search=100`을 함께 설정합니다.
 
-- HNSW 검색 SQL: [`sql/match_fashion_items_768.sql`](sql/match_fashion_items_768.sql)
-- 정확 필터 검색 SQL: [`sql/match_fashion_items_filtered_768.sql`](sql/match_fashion_items_filtered_768.sql)
+- HNSW 검색 SQL: [`sql/approximate_vector_search_768.sql`](sql/approximate_vector_search_768.sql)
+- 정확 필터 검색 SQL: [`sql/filtered_exact_vector_search_768.sql`](sql/filtered_exact_vector_search_768.sql)
 - 공식 설명: [Supabase HNSW indexes](https://supabase.com/docs/guides/ai/vector-indexes/hnsw-indexes)
 
 **2. 백엔드 전용 RPC 함수 두 개**:
 
-- `match_fashion_items_768`: 기존 이미지 HNSW 후보 검색과 선택적 소재 점수 재정렬을 담당합니다.
-- `match_fashion_items_filtered_768`: 정확 속성 필터 후 전체 일치 후보의 점수를 계산하고, 상위 상품과 DB 계측값을 반환합니다. 기존 팀 함수를 대체하지 않고 별도 함수로 추가합니다. 백엔드 코드 배포 전에 이 함수도 DB에 적용해야 합니다.
+- `approximate_vector_search_768`: 기존 이미지 HNSW 후보 검색과 선택적 소재 점수 재정렬을 담당합니다.
+- `filtered_exact_vector_search_768`: 정확 속성 필터 후 전체 일치 후보의 점수를 계산하고, 상위 상품과 DB 계측값을 반환합니다. 기존 팀 함수를 대체하지 않고 별도 함수로 추가합니다. 백엔드 코드 배포 전에 이 함수도 DB에 적용해야 합니다.
 
 함수 실행 권한은 `service_role`에만 있으며 브라우저의 `anon` 키로는 호출할 수 없습니다. 서비스 키는 프론트엔드 환경변수에 넣지 않고 백엔드에서만 사용합니다.
 
@@ -227,3 +227,19 @@ Gemini 추출 모델은 기존 `GEMINI_INTENT_MODEL` 등 설정을 유지한다.
 응답의 `pipeline.providers.intent`와 `pipeline.providers.target_description`에 요청 제공자·실제 제공자·상태를 기록한다. 추출 실패는 기존대로 규칙 파서(`rule_based`)로 전환하고, 설명 생성은 기존 Qwen/원문 대체 정책을 유지한다. 최상위 `provider`는 기존처럼 설명 생성의 실제 제공자다.
 
 이 옵션은 `/search`의 두 추론 작업에만 적용한다. 임베딩, 추천 이유 생성, 별도 `/analyze`의 기본 설정은 변경하지 않는다. 역할별 지정은 API 폼 필드로 제공하며 화면에 별도 선택 메뉴는 추가하지 않았다.
+
+### 로컬 Python 개발 환경
+
+프로젝트 루트에서 Python 3.11 가상환경에 설치합니다.
+
+```bash
+uv pip install --python .venv/bin/python -r requirements-dev.txt
+```
+
+`requirements-dev.txt`는 서버 기본 의존성, 로컬 CLIP/Qwen 의존성과 pytest/httpx를 포함합니다. 로컬 Qwen3.5 지원은 Transformers 5.x를 사용합니다. 모델 가중치는 별도로 준비해야 하며 패키지 설치만으로 다운로드되지 않습니다. 과거 LMDeploy 실험 스크립트의 GPU 전용 환경은 이 macOS 개발 설치 범위에 포함하지 않습니다.
+
+### 검색 함수 이름 구분
+
+- `search_filtered_exact()` → `filtered_exact_vector_search_768`: 속성 필터 후 일치 후보 전체의 벡터 점수를 계산합니다.
+- `search_approximate()` → `approximate_vector_search_768`: 이미지 벡터 근사 후보 검색 후 선택적으로 소재 점수를 반영합니다. 실제 인덱스 사용은 DB 실행 계획에 따릅니다.
+- 기존 DB 함수 `match_fashion_items_filtered_768`, `match_fashion_items_768`은 기존 배포와 다른 호출의 호환성을 위해 유지합니다. 새 코드 배포 전에 새 이름의 SQL 함수가 설치되어 있어야 합니다.

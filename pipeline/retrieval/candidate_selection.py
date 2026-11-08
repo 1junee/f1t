@@ -3,7 +3,6 @@ from __future__ import annotations
 import os
 import re
 import unicodedata
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any, Iterable
 
@@ -129,15 +128,6 @@ FABRIC_TERMS = (
     "데님", "울", "양모", "폴리", "폴리에스터", "나일론", "가죽", "레더",
     "스웨이드", "코듀로이", "니트", "플리스", "저지", "메쉬",
 )
-DETAIL_DESCRIPTION_TERMS = (
-    "리본", "땡땡이", "도트", "스트라이프", "체크", "프린트", "로고", "패턴",
-    "무지", "플라워", "꽃", "레이스", "프릴", "주름", "플리츠", "자수",
-    "그래픽", "캐릭터", "카라", "후드", "포켓", "주머니", "지퍼", "버튼",
-    "슬릿", "워싱", "데미지", "카고", "stripe", "check", "print", "logo",
-    "pattern", "plain", "floral", "lace", "frill", "pleats", "graphic",
-    "collar", "hood", "pocket", "zip", "button", "slit", "washed",
-    "distressed", "cargo",
-)
 ABSTRACT_TPO_TERMS = (
     "tpo", "면접", "출근", "회사", "오피스", "비즈니스", "하객", "결혼식",
     "데이트", "소개팅", "여행", "휴가", "캠핑", "운동", "러닝", "헬스",
@@ -192,36 +182,6 @@ for field, values in DB_EXACT_MATCH_VARIANTS.items():
             *variants,
         )
 
-DETAIL_DESCRIPTION_LABELS = {
-    "리본": "ribbon",
-    "땡땡이": "polka dot pattern",
-    "도트": "polka dot pattern",
-    "스트라이프": "striped pattern",
-    "체크": "check pattern",
-    "프린트": "print",
-    "로고": "logo",
-    "패턴": "pattern",
-    "무지": "plain design",
-    "플라워": "floral pattern",
-    "꽃": "floral pattern",
-    "레이스": "lace detail",
-    "프릴": "frill detail",
-    "주름": "pleated detail",
-    "플리츠": "pleated detail",
-    "자수": "embroidered detail",
-    "그래픽": "graphic print",
-    "캐릭터": "character graphic",
-    "카라": "collar",
-    "후드": "hood",
-    "포켓": "pocket",
-    "주머니": "pocket",
-    "지퍼": "zipper",
-    "버튼": "button",
-    "슬릿": "slit",
-    "워싱": "washed finish",
-    "데미지": "distressed detail",
-    "카고": "cargo pocket",
-}
 
 @dataclass(frozen=True)
 class ParsedTextAttributes:
@@ -260,11 +220,9 @@ class ParsedTextAttributes:
 
 
 @dataclass(frozen=True)
-class ParallelTextAnalysis:
-    # 검색용 속성과 설명문에 보탤 디테일을 따로 보관하는 분석 결과다.
+class TextAnalysis:
+    # 규칙으로 읽은 검색 속성과 요청 유형을 보관한다.
     structured_attributes: ParsedTextAttributes
-    detail_terms: str | None
-    detail_hint: str | None
     intent_type: str
     lane_metadata: dict[str, Any]
 
@@ -285,7 +243,6 @@ class AttributeTextSearchPlan:
     user_filter_overrides: dict[str, str]
     intent_type: str
     analysis_lanes: dict[str, Any]
-    detail_hint: str | None
     extraction_info: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
@@ -320,7 +277,6 @@ class AttributeTextSearchPlan:
             ),
             "parsed_attributes": self.parsed_attributes.to_dict(),
             "analysis_lanes": self.analysis_lanes,
-            "detail_hint": self.detail_hint,
             "intent_extraction": {
                 "status": (self.extraction_info or {}).get("status", INTENT_EXTRACTION_STATUS),
                 "method": (self.extraction_info or {}).get("method", "rule_based_keyword_parser"),
@@ -358,38 +314,24 @@ class AttributeTextSearchPlan:
 
 def parse_text_attributes(query: str) -> ParsedTextAttributes:
     # 기존 호출부에는 분석 전체 대신 구조화된 속성만 돌려준다.
-    return analyze_text_query_in_parallel(query).parsed_attributes
+    return analyze_text_query(query).parsed_attributes
 
 
-def analyze_text_query_in_parallel(query: str) -> ParallelTextAnalysis:
-    # 여기서는 외부 모델을 호출하지 않고, 속성 키워드와 시각 디테일을 나눠 읽는다.
+def analyze_text_query(query: str) -> TextAnalysis:
+    # 외부 모델 호출 없이 속성 키워드와 요청 유형을 분석한다.
     normalized = _normalize_query(query)
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        structured_future = executor.submit(_parse_structured_attributes, normalized)
-        detail_future = executor.submit(_parse_detail_description, normalized)
-        structured_attributes = structured_future.result()
-        detail_terms, detail_hint = detail_future.result()
+    structured_attributes = _parse_structured_attributes(normalized)
 
     intent_type = _detect_intent_type(normalized, structured_attributes)
-    # 두 작업이 끝난 뒤 결과를 합친다. 이 스레드 병렬화는 외부 모델 호출과 별개다.
     structured_fields = structured_attributes.to_dict()
     lane_metadata = {
         "structured_attributes": {
             "status": "filled" if structured_fields else "empty",
             "fields": sorted(structured_fields),
-                "implementation": INTENT_EXTRACTION_STATUS,
+            "implementation": INTENT_EXTRACTION_STATUS,
             "scope": (
                 "sleeve, length, category1, sex, season, stretch, thickness, "
                 "fit, color, fabric"
-            ),
-        },
-        "detail_hint": {
-            "status": "filled" if detail_hint else "empty",
-            "terms": detail_terms,
-            "target_description": detail_hint,
-            "scope": (
-                "visible details for target-description generation: pattern, logo, "
-                "graphics, trim, pocket, zip, collar, hood, pleats, ribbon, lace"
             ),
         },
         "intent": {
@@ -398,10 +340,8 @@ def analyze_text_query_in_parallel(query: str) -> ParallelTextAnalysis:
         },
     }
 
-    return ParallelTextAnalysis(
+    return TextAnalysis(
         structured_attributes=structured_attributes,
-        detail_terms=detail_terms,
-        detail_hint=detail_hint,
         intent_type=intent_type,
         lane_metadata=lane_metadata,
     )
@@ -419,7 +359,7 @@ def build_attribute_text_search_plan(
 ) -> AttributeTextSearchPlan:
 
     # 성공한 VLM 결과는 빈 속성까지 존중한다. 규칙으로 제외된 조건을 되살리지 않는다.
-    analysis = analyze_text_query_in_parallel(query)
+    analysis = analyze_text_query(query)
     parsed = (
         extracted_attributes
         if extracted_attributes is not None
@@ -467,7 +407,6 @@ def build_attribute_text_search_plan(
         user_filter_overrides=user_overrides,
         intent_type=analysis.intent_type,
         analysis_lanes=analysis.lane_metadata,
-        detail_hint=analysis.detail_hint,
         extraction_info=extraction_info,
     )
 
@@ -518,20 +457,6 @@ def _parse_structured_attributes(normalized: str) -> ParsedTextAttributes:
     return ParsedTextAttributes(**values)
 
 
-def _parse_detail_description(normalized: str) -> tuple[str | None, str | None]:
-    # 한국어 디테일을 사전의 영어 표현으로 바꿔 설명문 생성에 보탤 문장을 만든다.
-    terms = _matched_terms(normalized, DETAIL_DESCRIPTION_TERMS)
-    display_terms = ", ".join(dict.fromkeys(terms)) or None
-    canonical_terms = ", ".join(
-        # 같은 뜻의 표현이 여러 번 나와도 처음 등장한 순서대로 한 번만 넣는다.
-        dict.fromkeys(DETAIL_DESCRIPTION_LABELS.get(term, term) for term in terms)
-    )
-    target_description = (
-        f"Prioritize visible item details: {canonical_terms}."
-        if canonical_terms
-        else None
-    )
-    return display_terms, target_description
 
 
 def _detect_intent_type(

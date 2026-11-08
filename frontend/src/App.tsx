@@ -1375,11 +1375,11 @@ function App() {
                   <p className="f1t-timing-note">서버 처리 {(searchTimings.total_ms / 1000).toFixed(2)}초 · 전체 시간에는 서버 준비와 네트워크 왕복이 포함됩니다.</p>
                   <dl className="f1t-timing-stages">
                     {searchTimings.stages.map((stage) => <div key={stage.id}>
-                      <dt>{stage.label}{stage.parallel_group && <span className="f1t-timing-parallel">{stage.parallel_group === 'analysis' ? '병렬 ①' : '병렬 ②'}</span>}</dt>
+                      <dt>{stage.label}{stage.parallel_group && <span className="f1t-timing-parallel">{stage.parallel_group === 'analysis' ? '1차 묶음 · 동시 실행' : stage.parallel_group === 'encoding' ? '2차 묶음 · 동시 실행' : '동시 실행'}</span>}</dt>
                       <dd>{(stage.duration_ms / 1000).toFixed(2)}초</dd>
                     </div>)}
                   </dl>
-                  <p className="f1t-timing-note">같은 병렬 번호의 단계는 동시에 진행되어, 단계별 시간의 합과 전체 시간이 다릅니다.</p>
+                  <p className="f1t-timing-note">1차 묶음(의도 추출·목표 설명 생성)이 끝나면 검색 조건을 구성하고, 2차 묶음(번역·설명 임베딩·소재 조건이 있을 때 소재 임베딩)을 실행합니다. 각 묶음 안에서만 동시에 진행하므로 단계별 시간의 합은 전체 시간과 다릅니다.</p>
                 </> : <p className="f1t-timing-note">전체 응답 시간입니다. 이 검색의 단계별 시간 정보는 제공되지 않았어요.</p>}
               </div>
             </details>

@@ -90,18 +90,18 @@ def test_analyze_hides_internal_error_details(monkeypatch: pytest.MonkeyPatch) -
     assert "private provider" not in str(exc_info.value.detail)
 
 
-def test_multi_table_search_fails_when_any_required_table_is_unavailable() -> None:
+def test_legacy_multi_table_search_fails_when_any_required_table_is_unavailable() -> None:
     class PartiallyFailingSearch:
-        def search(self, *, table_filter: str, **_kwargs: object) -> list[dict[str, object]]:
+        def search_approximate(self, *, table_filter: str, **_kwargs: object) -> list[dict[str, object]]:
             if table_filter == "musinsa_pants":
                 raise RuntimeError("database detail")
             return [{"similarity": 0.9, "source_table": table_filter}]
 
-    pipeline = FashionRecommendationPipeline.__new__(FashionRecommendationPipeline)
-    pipeline.vector_search = PartiallyFailingSearch()
+    from pipeline.benchmarks.retrieval_request_comparison import search_three_requests_legacy
 
     with pytest.raises(RuntimeError, match="일부 상품 카테고리"):
-        pipeline._search_vectors(
+        search_three_requests_legacy(
+            vector_search=PartiallyFailingSearch(),
             embedding=[0.1],
             match_count=3,
             table_filter=None,

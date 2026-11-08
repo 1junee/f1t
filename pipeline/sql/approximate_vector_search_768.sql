@@ -3,7 +3,7 @@
 -- 요청 시 만든 설명문 벡터를 입력받아, 이미 저장된 상품 벡터와 비교하고 상품 행을 반환한다.
 -- p_fabric_embedding이 NULL이면 이미지 점수만, 값이 있으면 이미지·소재 가중 점수를 쓴다.
 
-create or replace function public.match_fashion_items_768(
+create or replace function public.approximate_vector_search_768(
   p_query_embedding extensions.vector,
   p_match_count integer default 10,
   p_table_filter text default null,
@@ -201,15 +201,15 @@ begin
 end;
 $function$;
 
-comment on function public.match_fashion_items_768(
+comment on function public.approximate_vector_search_768(
   extensions.vector, integer, text, text, text, extensions.vector
 ) is 'Backend-only Gemini retrieval. Sets HNSW ef_search to 100, selects 50-100 image candidates, then applies optional 80/20 image/fabric reranking.';
 
 -- 브라우저 공개 키로 직접 호출하지 않고 백엔드의 service_role만 실행하도록 제한한다.
-revoke all on function public.match_fashion_items_768(
+revoke all on function public.approximate_vector_search_768(
   extensions.vector, integer, text, text, text, extensions.vector
 ) from public, anon, authenticated;
 
-grant execute on function public.match_fashion_items_768(
+grant execute on function public.approximate_vector_search_768(
   extensions.vector, integer, text, text, text, extensions.vector
 ) to service_role;

@@ -154,15 +154,24 @@ test('검색 완료 시간과 병렬 단계 시간을 표시하고 홈 이동 �
     pipeline: { timings: { total_ms: 1100, stages: [
       { id: 'intent', label: '검색 의도·조건 해석', duration_ms: 800, parallel_group: 'analysis' },
       { id: 'description', label: '목표 상품 설명 생성', duration_ms: 900, parallel_group: 'analysis' },
+      { id: 'search_plan', label: '검색 조건 구성', duration_ms: 10 },
+      { id: 'translation', label: '번역', duration_ms: 100, parallel_group: 'encoding' },
+      { id: 'embedding', label: '설명 임베딩', duration_ms: 120, parallel_group: 'encoding' },
+      { id: 'fabric_embedding', label: '소재 임베딩', duration_ms: 110, parallel_group: 'encoding' },
     ] } },
   }) })
   await app.submit('검은 셔츠')
   const timing = app.node((node) => node.props.className === 'f1t-search-timing')
   assert.match(text(timing), /1.25초.*검색 완료/)
   assert.match(text(timing), /서버 처리 1.10초/)
-  assert.match(text(timing), /검색 의도·조건 해석병렬 ①0.80초/)
-  assert.match(text(timing), /목표 상품 설명 생성병렬 ①0.90초/)
-  assert.match(text(timing), /단계별 시간의 합과 전체 시간이 다릅니다/)
+  assert.match(text(timing), /검색 의도·조건 해석1차 묶음 · 동시 실행0.80초/)
+  assert.match(text(timing), /목표 상품 설명 생성1차 묶음 · 동시 실행0.90초/)
+  assert.match(text(timing), /검색 조건 구성0.01초/)
+  assert.match(text(timing), /번역2차 묶음 · 동시 실행0.10초/)
+  assert.match(text(timing), /설명 임베딩2차 묶음 · 동시 실행0.12초/)
+  assert.match(text(timing), /소재 임베딩2차 묶음 · 동시 실행0.11초/)
+  assert.match(text(timing), /1차 묶음.*끝나면 검색 조건을 구성하고, 2차 묶음/)
+  assert.match(text(timing), /각 묶음 안에서만 동시에 진행/)
   app.node((node) => node.props['aria-label'] === 'F1T 홈').props.onClick()
   app.render()
   assert.equal(app.nodes((node) => node.props.className === 'f1t-search-timing').length, 0)

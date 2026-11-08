@@ -164,7 +164,6 @@ def generate_query_recommendation_explanation(
     query: str,
     parsed_attributes: dict[str, str] | None,
     target_description_ko: str,
-    detail_hint: str | None = None,
     target_description_reasoning: dict[str, Any] | None = None,
     has_reference_image: bool = False,
     model_name: str | None = None,
@@ -175,7 +174,6 @@ def generate_query_recommendation_explanation(
     fallback = build_query_recommendation_explanation(
         parsed_attributes=parsed_attributes,
         target_description_ko=target_description_ko,
-        detail_hint=detail_hint,
         has_reference_image=has_reference_image,
     )
     model_name = resolve_recommendation_reason_model(model_name)
@@ -204,7 +202,6 @@ def generate_query_recommendation_explanation(
             query=query,
             parsed_attributes=parsed_attributes or {},
             target_description_ko=target_description_ko,
-            detail_hint=detail_hint,
             target_description_reasoning=target_description_reasoning or {},
             has_reference_image=has_reference_image,
         )
@@ -236,13 +233,12 @@ def generate_query_recommendation_explanation(
 def build_query_recommendation_explanation(
     parsed_attributes: dict[str, str] | None,
     target_description_ko: str,
-    detail_hint: str | None = None,
     has_reference_image: bool = False,
 ) -> str:
     # API 없이 속성과 문장 템플릿만으로 만드는 대체 문구다.
     attributes = parsed_attributes or {}
     target = target_description_ko.strip()
-    conditions = _condition_phrases(attributes, target, detail_hint)
+    conditions = _condition_phrases(attributes, target)
     condition_text = _join_korean_phrases(conditions)
 
     if has_reference_image:
@@ -274,7 +270,6 @@ def build_query_recommendation_explanation(
     closing = _style_reason_sentence(
         attributes,
         target,
-        detail_hint,
         has_reference_image,
     )
     return f"{opening} {closing}"
@@ -296,7 +291,6 @@ def _build_gemini_recommendation_reason_prompt(
     query: str,
     parsed_attributes: dict[str, str],
     target_description_ko: str,
-    detail_hint: str | None,
     target_description_reasoning: dict[str, Any],
     has_reference_image: bool,
 ) -> str:
@@ -316,7 +310,6 @@ def _build_gemini_recommendation_reason_prompt(
         "has_reference_image": has_reference_image,
         "extracted_attributes": parsed_attributes,
         "target_description_ko": target_description_ko,
-        "detail_hint": detail_hint or "",
         "reasoning_context": reasoning_context,
     }
     return (
@@ -484,7 +477,6 @@ def _attribute_phrase(field: str, value: str) -> str:
 def _condition_phrases(
     attributes: dict[str, str],
     target_description_ko: str,
-    detail_hint: str | None,
 ) -> list[str]:
     phrases: list[str] = []
     category = _normalize(attributes.get("category1"))
@@ -527,7 +519,7 @@ def _condition_phrases(
         if category:
             phrases.append(_category_condition_phrase(category))
 
-    phrases.extend(_condition_detail_phrases(detail_hint or target_description_ko))
+    phrases.extend(_condition_detail_phrases(target_description_ko))
     return _dedupe_phrases(phrases)
 
 
@@ -572,9 +564,9 @@ def _color_phrase(value: str) -> str:
     return f"{text} 색감"
 
 
-def _detail_phrases(detail_hint: str | None) -> list[str]:
+def _detail_phrases(description: str | None) -> list[str]:
     # 모델 호출 없이 미리 정한 디테일 단어를 찾아 설명에 쓸 한국어 표현으로 바꾼다.
-    text = str(detail_hint or "").lower()
+    text = str(description or "").lower()
     details: list[str] = []
     if "character" in text or "캐릭터" in text:
         details.append("캐릭터 그래픽")
@@ -589,19 +581,18 @@ def _detail_phrases(detail_hint: str | None) -> list[str]:
     return _dedupe_phrases(details)
 
 
-def _condition_detail_phrases(detail_hint: str | None) -> list[str]:
-    details = _detail_phrases(detail_hint)
+def _condition_detail_phrases(description: str | None) -> list[str]:
+    details = _detail_phrases(description)
     return ["후드 디테일" if detail == "후드" else detail for detail in details if detail == "후드"]
 
 
 def _style_reason_sentence(
     attributes: dict[str, str],
     target_description_ko: str,
-    detail_hint: str | None,
     has_reference_image: bool,
 ) -> str:
     category = _normalize(attributes.get("category1"))
-    details = _detail_phrases(detail_hint or target_description_ko)
+    details = _detail_phrases(target_description_ko)
     fit = _normalize(attributes.get("fit"))
     thickness = _normalize(attributes.get("thickness"))
 

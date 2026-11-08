@@ -78,7 +78,7 @@ def main():
         report["legacy"], legacy_ids = legacy_probe(client, embedding)
     for _ in range(args.runs):
         started = perf_counter()
-        products, diagnostics = client.search_filtered(
+        products, diagnostics = client.search_filtered_exact(
             embedding, 3, table_filter="musinsa_top_clothes", metadata_filters={"sleeve": "short"},
         )
         run = {"elapsed_ms": round((perf_counter()-started)*1000, 2), "diagnostics": diagnostics,

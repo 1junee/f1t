@@ -1,0 +1,5 @@
+# Local model support and automated tests
+-r requirements.txt
+-r pipeline/requirements-local.txt
+pytest>=8,<10
+httpx>=0.27,<1

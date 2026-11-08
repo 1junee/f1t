@@ -49,11 +49,11 @@ class SupabaseVectorSearchClient:
             raise ValueError(
                 f"Only 768-dimensional Gemini embeddings are supported; got {dim}."
             )
-        return "match_fashion_items_768"
+        return "approximate_vector_search_768"
 
     # 목표 설명문 벡터·선택적 소재 벡터·범위 조건 → DB가 계산한 후보 상품 목록.
     # 상품 이미지/소재 벡터는 DB에 이미 저장돼 있으므로 이 요청에 모두 싣지 않는다.
-    def search(
+    def search_approximate(
         self,
         embedding: Sequence[float],
         match_count: int,
@@ -95,7 +95,7 @@ class SupabaseVectorSearchClient:
             if exc.code == 404 or "PGRST202" in body:
                 raise RuntimeError(
                     f"Supabase RPC {rpc}를 찾지 못했습니다. "
-                    "배포 전에 Supabase SQL Editor에서 match_fashion_items_768 RPC를 "
+                    "배포 전에 Supabase SQL Editor에서 approximate_vector_search_768 RPC를 "
                     "생성했는지 확인해 주세요."
                 ) from exc
 
@@ -116,7 +116,7 @@ class SupabaseVectorSearchClient:
 
         return data
 
-    def search_filtered(
+    def search_filtered_exact(
         self,
         embedding: Sequence[float],
         match_count: int,
@@ -148,7 +148,7 @@ class SupabaseVectorSearchClient:
                 translated = translate_to_db_value(key, value)
                 filters[key] = translated if isinstance(translated, list) else [translated]
 
-        rpc = "match_fashion_items_filtered_768"
+        rpc = "filtered_exact_vector_search_768"
         payload = {
             "p_query_embedding": self._to_pgvector(embedding),
             "p_match_count": match_count,
@@ -179,7 +179,7 @@ class SupabaseVectorSearchClient:
             if exc.code == 404 or "PGRST202" in error_body:
                 raise RuntimeError(
                     f"Supabase RPC {rpc}를 찾지 못했습니다. "
-                    "pipeline/sql/match_fashion_items_filtered_768.sql 배포를 확인해 주세요."
+                    "pipeline/sql/filtered_exact_vector_search_768.sql 배포를 확인해 주세요."
                 ) from exc
             # SQL 오류 본문에는 내부 정보가 있을 수 있으므로 사용자 응답에 그대로 싣지 않는다.
             raise RuntimeError(f"Supabase filtered vector search failed. HTTP {exc.code}") from exc

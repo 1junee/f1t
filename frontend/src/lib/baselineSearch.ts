@@ -62,7 +62,6 @@ export type SearchPipelineMetadata = {
   intent_type?: string
   parsed_attributes?: Record<string, string>
   analysis_lanes?: Record<string, unknown>
-  detail_hint?: string | null
   descriptions?: Record<string, string | null | undefined>
   target_description_request?: string
   retrieval_description?: string

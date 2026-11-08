@@ -2,7 +2,7 @@
 
 현재 정확 필터 RPC의 DB·HTTP 계측과 기존 REST 방식 비교는 [`retrieval_diagnostics.py`](retrieval_diagnostics.py)를 사용합니다. 측정 방법, 결과, 응답 필드 설명은 [상품 조회 진단](RETRIEVAL_DIAGNOSTICS.md)에 정리했습니다. 아래 `search_latency.py`는 기존 방식 비교 실험입니다.
 
-`search_latency.py`는 동일한 검색용 설명문 임베딩으로 전수 비교와 **이전 REST/Python 검색 방식**의 지연을 비교하는 벤치마크입니다. 현재 운영의 정확 메타데이터 검색은 `match_fashion_items_filtered_768` RPC를 사용하므로, 이 스크립트의 `hybrid` 결과를 현재 운영 성능으로 해석하면 안 됩니다.
+`search_latency.py`는 동일한 검색용 설명문 임베딩으로 전수 비교와 **이전 REST/Python 검색 방식**의 지연을 비교하는 벤치마크입니다. 현재 운영의 정확 메타데이터 검색은 `filtered_exact_vector_search_768` RPC를 사용하므로, 이 스크립트의 `hybrid` 결과를 현재 운영 성능으로 해석하면 안 됩니다.
 
 - `full_scan`: HNSW와 bitmap scan을 끄고 세 상품 테이블의 모든 이미지 임베딩을 정확 코사인 비교
 - `hybrid`: 이전 방식의 비교군. 명시 속성이 있으면 REST로 후보·벡터를 받아 Python에서 정확 코사인 재정렬하고, 후보가 없으면 HNSW 검색
@@ -100,3 +100,20 @@ JSON은 요약과 원본 표본을 함께 저장하고 같은 경로에 CSV도 �
 방법별 평균·p95는 각각의 성공 표본 전체를 요약하고, `paired`의 절감 시간·배속·감소율은 양쪽이 모두 성공한 동일 표본만 사용합니다. 실패 개수도 함께 보고하세요. 후보 수 요약은 각 방법의 성공 표본 전체로 계산되므로 실패가 비대칭이면 paired 비교와 표본 집합이 다를 수 있습니다.
 
 `full_scan`은 이미지 코사인만, 소재 조건이 있는 `hybrid`는 이미지·소재 가중 점수를 사용합니다. 두 방식의 순위 차이는 인덱스 근사 오차만을 뜻하지 않습니다. 순수 검색 recall 실험에는 같은 후보 범위·같은 점수 함수의 exact 기준이 별도로 필요합니다.
+
+
+## 근사 검색 요청·병합 구조 비교
+
+현재 운영 `FashionRecommendationPipeline._search_vectors()`는 범위가 없어도 DB에 한 번 요청하며, DB가 테이블별 후보를 병합·정렬합니다. 이전 구현은 `retrieval_request_comparison.py`의 `search_three_requests_legacy()`로 보존했습니다. 운영 코드에서는 이 실험 함수를 호출하지 않습니다.
+
+```python
+from pipeline.benchmarks.retrieval_request_comparison import search_three_requests_legacy
+
+# pipeline은 초기화된 FashionRecommendationPipeline, kwargs는 동일한 고정 입력이다.
+# kwargs: embedding, match_count, table_filter, category2_filter,
+#         category2_keyword_filter, fabric_embedding
+old_rows = search_three_requests_legacy(pipeline.vector_search, **kwargs)
+new_rows = pipeline._search_vectors(**kwargs)
+```
+
+범위 없는 입력으로 기존 3회/현재 1회를 비교합니다. 위 예시는 호출법이며 반복 측정기는 아닙니다. 실제 paired 실험에서는 순서를 섞고 같은 벡터·필터·개수·가중치를 유지해 시간과 결과를 기록해야 합니다. 이전 함수의 전체 빈 결과 오류도 재현 목적으로 유지했으므로 정상 0건과 실제 장애는 별도 집계합니다. 단위 테스트는 호출 횟수·인자·병합·오류 계약을 검증하며 실제 성능 개선을 입증하지 않습니다. 상세 설계는 로컬 `experiments/06_retrieval_execution/PLAN.md`에 있습니다.

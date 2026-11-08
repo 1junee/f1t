@@ -1,7 +1,7 @@
 -- 개인 서비스용: 기존 팀 RPC/테이블/인덱스는 변경하지 않는다.
 -- 조건을 만족하는 모든 상품을 DB 안에서 정확 코사인 점수로 정렬한다.
 -- ID순 1,000개 제한과 벡터 다운로드가 없으며, ANN 근사 검색이 아니다.
-create or replace function public.match_fashion_items_filtered_768(
+create or replace function public.filtered_exact_vector_search_768(
   p_query_embedding extensions.vector,
   p_match_count integer default 10,
   p_table_filter text default null,
@@ -135,9 +135,9 @@ end;
 $function$;
 
 -- 브라우저에서 직접 호출하지 않고 백엔드의 service_role만 실행할 수 있다.
-revoke all on function public.match_fashion_items_filtered_768(
+revoke all on function public.filtered_exact_vector_search_768(
   extensions.vector,integer,text,text,text,extensions.vector,jsonb
 ) from public, anon, authenticated;
-grant execute on function public.match_fashion_items_filtered_768(
+grant execute on function public.filtered_exact_vector_search_768(
   extensions.vector,integer,text,text,text,extensions.vector,jsonb
 ) to service_role;

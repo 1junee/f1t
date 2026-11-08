@@ -151,7 +151,7 @@ def test_search_passes_same_plan_scope_to_strict_and_rpc(monkeypatch, strict_row
     pipeline._search_vectors = Mock(return_value=[{"id": "p2", "similarity": 0.5}])
     fetch = (Mock(side_effect=strict_rows) if isinstance(strict_rows, Exception) else
              Mock(return_value=(strict_rows, {"matched_count": len(strict_rows), "request_count": 1})))
-    pipeline.vector_search = SimpleNamespace(search_filtered=fetch)
+    pipeline.vector_search = SimpleNamespace(search_filtered_exact=fetch)
     monkeypatch.setattr(service, "generate_query_recommendation_explanation", lambda **kwargs: SimpleNamespace(
         recommendation_reason="추천 설명", to_metadata=lambda: {},
     ))
@@ -407,3 +407,30 @@ def test_invalid_role_provider_fails_before_model_calls(monkeypatch, role):
     with pytest.raises(ValueError, match="provider"):
         pipeline_without_io().search("상의", **{role: "unknown"})
     extraction.assert_not_called()
+
+
+def test_search_plan_does_not_turn_excluded_detail_into_hint():
+    plan = candidates.build_attribute_text_search_plan(
+        "리본 없는 셔츠", top_k=3,
+        extracted_attributes=candidates.ParsedTextAttributes(category1="top"),
+        extraction_info={"status": "ok"},
+    )
+    assert plan.table_filter == "musinsa_top_clothes"
+    assert "detail_hint" not in plan.to_dict()
+    assert set(plan.analysis_lanes) == {"structured_attributes", "intent"}
+
+
+def test_recommendation_prompt_keeps_original_request_without_rule_detail_hint():
+    from pipeline.target_description import recommendation_explanation as explanation
+    prompt = explanation._build_gemini_recommendation_reason_prompt(
+        query="리본 없는 셔츠", parsed_attributes={"category1": "top"},
+        target_description_ko="리본이 없는 셔츠",
+        target_description_reasoning={"Target Image Description": "shirt without a ribbon"},
+        has_reference_image=False,
+    )
+    assert "리본 없는 셔츠" in prompt
+    assert "detail_hint" not in prompt
+    assert "Prioritize visible item details" not in prompt
+    fallback = explanation.build_query_recommendation_explanation(
+        parsed_attributes={"category1": "top"}, target_description_ko="리본이 없는 셔츠")
+    assert fallback
