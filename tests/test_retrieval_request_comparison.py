@@ -1,11 +1,15 @@
 """운영의 단일 요청과 실험용 이전 3회 요청의 계약을 확인한다."""
+import json
+import urllib.request
+from io import BytesIO
 from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
 
 from pipeline.benchmarks.retrieval_request_comparison import search_three_requests_legacy
-from pipeline.recommendation_service import FashionRecommendationPipeline, VALID_TABLES
+from pipeline.recommendation_service import VALID_TABLES
+from pipeline.vector_db_client import SupabaseVectorSearchClient
 
 
 def inputs():
@@ -16,31 +20,38 @@ def inputs():
 
 @pytest.mark.parametrize('scope', [{}, {'table_filter': 'musinsa_top_clothes'},
     {'category2_filter': '반소매 티셔츠'}, {'category2_keyword_filter': '셔츠'}])
-def test_production_calls_once_and_preserves_all_arguments(scope):
+def test_production_client_calls_rpc_once_and_preserves_all_arguments(monkeypatch, scope):
     rows = [{'id': 'a', 'similarity': 0.9}, {'id': 'b', 'similarity': 0.8}]
-    request = Mock(return_value=rows)
-    pipeline = FashionRecommendationPipeline.__new__(FashionRecommendationPipeline)
-    pipeline.vector_search = SimpleNamespace(search_approximate=request)
+    request = Mock(return_value=BytesIO(json.dumps(rows).encode()))
+    monkeypatch.setattr(urllib.request, 'urlopen', request)
+    client = SupabaseVectorSearchClient('https://example.invalid', 'test-key')
     kwargs = inputs()
     kwargs.update(scope)
-    assert pipeline._search_vectors(**kwargs) is rows
-    request.assert_called_once_with(**kwargs)
+    assert client.search_approximate(**kwargs) == rows
+    request.assert_called_once()
+    sent = request.call_args.args[0]
+    assert sent.full_url.endswith('/rpc/approximate_vector_search_768')
+    payload = json.loads(sent.data)
+    assert json.loads(payload['p_query_embedding']) == kwargs['embedding']
+    assert json.loads(payload['p_fabric_embedding']) == kwargs['fabric_embedding']
+    for key in ('match_count', 'table_filter', 'category2_filter', 'category2_keyword_filter'):
+        assert payload[f'p_{key}'] == kwargs[key]
 
 
-def test_production_empty_results_are_not_database_failure():
-    pipeline = FashionRecommendationPipeline.__new__(FashionRecommendationPipeline)
-    request = Mock(return_value=[])
-    pipeline.vector_search = SimpleNamespace(search_approximate=request)
-    assert pipeline._search_vectors(**inputs()) == []
+def test_production_empty_results_are_not_database_failure(monkeypatch):
+    request = Mock(return_value=BytesIO(b'[]'))
+    monkeypatch.setattr(urllib.request, 'urlopen', request)
+    client = SupabaseVectorSearchClient('https://example.invalid', 'test-key')
+    assert client.search_approximate(**inputs()) == []
     request.assert_called_once()
 
 
-def test_production_database_error_propagates_without_retry_or_partial_results():
-    pipeline = FashionRecommendationPipeline.__new__(FashionRecommendationPipeline)
-    request = Mock(side_effect=RuntimeError('RPC unavailable'))
-    pipeline.vector_search = SimpleNamespace(search_approximate=request)
+def test_production_database_error_propagates_without_retry_or_partial_results(monkeypatch):
+    request = Mock(side_effect=urllib.error.URLError('RPC unavailable'))
+    monkeypatch.setattr(urllib.request, 'urlopen', request)
+    client = SupabaseVectorSearchClient('https://example.invalid', 'test-key')
     with pytest.raises(RuntimeError, match='RPC unavailable'):
-        pipeline._search_vectors(**inputs())
+        client.search_approximate(**inputs())
     request.assert_called_once()
 
 

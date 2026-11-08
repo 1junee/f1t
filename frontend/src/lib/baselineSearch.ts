@@ -64,7 +64,6 @@ export type SearchPipelineMetadata = {
   analysis_lanes?: Record<string, unknown>
   descriptions?: Record<string, string | null | undefined>
   target_description_request?: string
-  retrieval_description?: string
   text_attribute_fields?: string[]
   constrained_text_attributes?: Record<string, string[]>
   exact_filter_fields?: string[]
@@ -85,7 +84,6 @@ export type BaselineSearchResponse = {
   provider: string
   pipeline?: SearchPipelineMetadata
   target_description: string
-  target_description_ko?: string
   recommendation_reason?: string
   reasoning?: BaselineReasoningMetadata
   results: BaselineSearchResult[]

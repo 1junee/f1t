@@ -1,6 +1,6 @@
 """3회 순차 RPC + 서버 병합의 이전 구현. 운영에서는 호출하지 않는다.
 
-동일 입력으로 FashionRecommendationPipeline._search_vectors()와 비교한다.
+동일 입력으로 SupabaseVectorSearchClient.search_approximate()와 비교한다.
 범위가 있으면 기존처럼 1회, 범위가 없으면 3회 호출한다.
 기존의 전체 빈 결과를 오류로 처리하는 동작도 재현 목적으로 보존했다.
 성능 비교에서는 성공/빈 결과/오류를 구분해 기록해야 한다.

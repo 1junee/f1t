@@ -1,17 +1,13 @@
 # 검색의 실행 순서를 조율한다. 개별 모델 호출·속성 추출·DB 통신은 각 모듈에 맡긴다.
 from __future__ import annotations
 
-import json
 import logging
 import os
 import re
-import urllib.parse
-import urllib.request
 from concurrent.futures import ThreadPoolExecutor
+from threading import Lock
 from time import perf_counter
 from typing import Any
-
-import numpy as np
 
 from .env import load_pipeline_env
 from .timing import SearchTimings
@@ -22,6 +18,7 @@ from .retrieval.candidate_selection import (
 )
 from .retrieval.target_description_retrieval import RetrieveModule
 from .target_description.recommendation_explanation import (
+    SearchStatus,
     generate_query_recommendation_explanation,
 )
 from .target_description.target_description_generation import (
@@ -89,32 +86,6 @@ INTENT_RECOMMENDATION_STAGES = [
 ]
 
 
-# 설명문과 언어 코드 → 번역 문자열. 실패하면 빈 문자열을 반환해 검색 자체는 계속한다.
-def _google_translate(text: str, target_lang: str) -> str:
-    """Google Translate 무료 API (API 키 불필요)."""
-    if not text.strip():
-        return ""
-    try:
-        params = urllib.parse.urlencode(
-            {
-                "client": "gtx",
-                "sl": "auto",
-                "tl": target_lang,
-                "dt": "t",
-                "q": text,
-            }
-        )
-        req = urllib.request.Request(
-            f"https://translate.googleapis.com/translate_a/single?{params}",
-            headers={"User-Agent": "Mozilla/5.0"},
-        )
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-        return "".join(part[0] for part in data[0] if part and part[0]).strip()
-    except Exception:
-        return ""
-
-
 class FashionRecommendationPipeline:
     """Application-level fashion recommendation workflow."""
 
@@ -125,6 +96,7 @@ class FashionRecommendationPipeline:
 
         self._default_provider = os.getenv("VLM_PROVIDER", "gemini").lower()
         self._client_cache: dict[str, Any] = {}
+        self._client_cache_lock = Lock()
         self.retriever = RetrieveModule()
         self.vector_search = SupabaseVectorSearchClient()
 
@@ -132,21 +104,19 @@ class FashionRecommendationPipeline:
         # 설명 생성용 클라이언트는 해당 제공자를 처음 사용할 때 만들고 재사용한다.
         if provider not in VALID_PROVIDERS:
             raise ValueError("provider must be gemini, openai, or qwen.")
-        if provider not in self._client_cache:
-            if provider == "openai":
-                self._client_cache[provider] = OpenAIReasoningClient()
-            elif provider == "qwen":
-                self._client_cache[provider] = Qwen3VLReasoningClient()
-            else:
-                self._client_cache[provider] = GeminiReasoningClient()
-        return self._client_cache[provider]
+        # 확인·생성·저장을 함께 잠근다. 클라이언트의 run()은 잠금 밖에서 실행한다.
+        with self._client_cache_lock:
+            if provider not in self._client_cache:
+                if provider == "openai":
+                    self._client_cache[provider] = OpenAIReasoningClient()
+                elif provider == "qwen":
+                    self._client_cache[provider] = Qwen3VLReasoningClient()
+                else:
+                    self._client_cache[provider] = GeminiReasoningClient()
+            return self._client_cache[provider]
 
-    def _translate(self, text: str, target_lang: str) -> str:
-        is_korean = target_lang.lower() in ("korean", "한국어")
-        return _google_translate(text, "ko" if is_korean else "en")
-
-    # 사용자 입력과 옵션 → (영문 목표 설명, 한국어 번역, 실행 메타데이터, 상품 목록).
-    # API는 이 네 값을 화면용 JSON으로 포장한다. 이 함수가 검색 단계들의 연결 지점이다.
+    # 사용자 입력과 옵션 → (영문 목표 설명, 실행 메타데이터, 상품 목록).
+    # API는 이 세 값을 화면용 JSON으로 포장한다. 이 함수가 검색 단계들의 연결 지점이다.
     def search(
         self,
         query: str,
@@ -159,7 +129,7 @@ class FashionRecommendationPipeline:
         provider: str | None = None,
         intent_provider: str | None = None,
         target_description_provider: str | None = None,
-    ) -> tuple[str, str, dict[str, Any], list[dict[str, Any]]]:
+    ) -> tuple[str, dict[str, Any], list[dict[str, Any]]]:
         timings = SearchTimings()
 
         # 공통 제공자를 기본으로 쓰고 역할별 지정이 있으면 우선한다. 임베딩은 별도 설정이다.
@@ -231,6 +201,7 @@ class FashionRecommendationPipeline:
                 category2_keyword_filter=category2_keyword_filter,
             )
 
+        parsed_attributes = attribute_plan.parsed_attributes.to_dict()
         pipeline_metadata = attribute_plan.to_dict()
         pipeline_metadata["providers"] = {
             "intent": intent_extraction.to_metadata() if intent_extraction else None,
@@ -242,18 +213,16 @@ class FashionRecommendationPipeline:
         }
         pipeline_metadata["parallel_execution"] = {
             "intent_and_target_description": True,
-            "translation_and_embedding": True,
+            "description_and_fabric_embedding": bool(attribute_plan.parsed_attributes.fabric),
         }
 
         # 참고 이미지를 그대로 검색 벡터로 만들지 않고, 생성된 설명문을 검색 입력으로 사용한다.
         target_description = reasoning_result["Target Image Description"]
-        retrieval_description = target_description
         pipeline_metadata["descriptions"] = {
             "target_description_reasoning": target_description,
         }
         pipeline_metadata["target_description_reasoning"] = reasoning_result
         pipeline_metadata["target_description_request"] = query
-        pipeline_metadata["retrieval_description"] = retrieval_description
 
         # fabric 속성이 있으면 gemini 임베딩으로 인코딩 (target description 임베딩과 병렬)
         fabric_text = (
@@ -262,24 +231,15 @@ class FashionRecommendationPipeline:
             else None
         )
 
-        # 화면용 번역, 검색용 설명 임베딩, 선택적 소재 임베딩도 서로 독립적인 작업이다.
-        with ThreadPoolExecutor(max_workers=3) as executor:
-            translation_future = executor.submit(
-                timings.run,
-                "translation",
-                "설명문 번역",
-                "encoding",
-                self._translate,
-                target_description,
-                "Korean",
-            )
+        # 검색용 설명 임베딩과 선택적 소재 임베딩은 서로 독립적인 작업이다.
+        with ThreadPoolExecutor(max_workers=2) as executor:
             embedding_future = executor.submit(
                 timings.run,
                 "embedding",
                 "검색 문장 임베딩",
                 "encoding",
                 self.retriever.encode_text,
-                [retrieval_description],
+                [target_description],
             )
             fabric_future = (
                 executor.submit(
@@ -293,8 +253,6 @@ class FashionRecommendationPipeline:
                 if fabric_text
                 else None
             )
-            # 현재 구현은 번역까지 모두 끝난 다음 아래의 DB 검색으로 넘어간다.
-            target_description_ko = translation_future.result()
             # encode_text는 문장 목록을 받으므로 첫 결과 [0]을 꺼낸다. DB의 상품 벡터와 비교할 질의 벡터다.
             query_embedding = embedding_future.result()[0].tolist()
             fabric_embedding = (
@@ -311,13 +269,13 @@ class FashionRecommendationPipeline:
             results = None
 
             # 정확한 속성 조건은 DB 안에서 전체 일치 후보를 정렬한다. 벡터를 내려받지 않는다.
-            if _has_exact_metadata_filters(attribute_plan.parsed_attributes.to_dict()):
+            if _has_exact_metadata_filters(parsed_attributes):
                 strict_results, retrieval_diagnostics = (
                     self.vector_search.search_filtered_exact(
                         embedding=query_embedding,
                         # DB에서 이미 정확 필터와 전체 순위를 계산했으므로 요청한 수만 받는다.
                         match_count=top_k,
-                        metadata_filters=attribute_plan.parsed_attributes.to_dict(),
+                        metadata_filters=parsed_attributes,
                         table_filter=active_table_filter,
                         category2_filter=active_category2_filter,
                         category2_keyword_filter=active_category2_keyword_filter,
@@ -346,7 +304,7 @@ class FashionRecommendationPipeline:
             # 정확 조건이 없거나 일치 후보가 0개일 때 기존 완화 검색을 사용한다.
             if results is None:
                 fallback_started = perf_counter()
-                results = self._search_vectors(
+                results = self.vector_search.search_approximate(
                     embedding=query_embedding,
                     match_count=match_count,
                     table_filter=active_table_filter,
@@ -361,8 +319,9 @@ class FashionRecommendationPipeline:
                         "reason": "no_strict_candidates",
                         "strategy": "rpc_vector_search",
                         "duration_ms": round((perf_counter() - fallback_started) * 1000, 2),
-                        # 단일 RPC 전환 후에도 이 진단값은 아직 별도로 기록하지 않는다.
-                        "request_count": None,
+                        "scope": "approximate_rpc",
+                        # 성공한 완화 검색의 단일 RPC만 센다. 위 정확 검색 1회는 별도다.
+                        "request_count": 1,
                     }
 
         # 두 검색 경로의 결과에 동일한 후처리를 적용하고 최종 top_k개를 정한다.
@@ -373,6 +332,31 @@ class FashionRecommendationPipeline:
                 top_k,
             )
 
+        # 후처리까지 끝난 최종 결과를 기준으로 안내한다. 0건은 완화 여부보다 우선한다.
+        candidate_status = pipeline_metadata.get("candidate_selection", {}).get("status")
+        search_status: SearchStatus
+        if not results:
+            search_status = "no_results"
+        elif (
+            candidate_status == "fallback_no_strict_candidates"
+            or result_strategy.get("post_filter_status") == "relaxed_no_exact_matches"
+        ):
+            search_status = "relaxed"
+        elif candidate_status == "applied":
+            search_status = "exact"
+        else:
+            search_status = "similarity"
+        applied_filters = (
+            {
+                field: value
+                for field, value in parsed_attributes.items()
+                if field not in {"category1", "color", "fabric"}
+            }
+            if search_status == "exact"
+            else {}
+        )
+        pipeline_metadata["search_status"] = search_status
+
         pipeline_metadata["result_strategy"] = result_strategy
 
         pipeline_metadata["stages"] = INTENT_RECOMMENDATION_STAGES
@@ -382,7 +366,9 @@ class FashionRecommendationPipeline:
             recommendation_explanation = generate_query_recommendation_explanation(
                 query=query,
                 parsed_attributes=pipeline_metadata.get("parsed_attributes"),
-                target_description_ko=target_description_ko,
+                search_status=search_status,
+                result_count=len(results),
+                applied_filters=applied_filters,
                 target_description_reasoning=reasoning_result,
                 has_reference_image=bool(image_bytes),
             )
@@ -399,7 +385,7 @@ class FashionRecommendationPipeline:
         }
 
         pipeline_metadata["timings"] = timings.snapshot()
-        return target_description, target_description_ko, metadata, results
+        return target_description, metadata, results
 
     # 원본 문장·이미지 → 목표 설명 딕셔너리, 실제 사용 제공자, 상태, 경고 목록.
     # 대체 경로를 사용해도 반환 형태를 유지하므로 search()가 같은 방식으로 이어서 처리한다.
@@ -432,6 +418,7 @@ class FashionRecommendationPipeline:
             # 비패션 입력은 API가 400으로 응답해야 하므로 원문 검색으로 전환하지 않는다.
             raise
         except ReasoningProviderError as exc:
+            logger.exception("목표 상품 설명 생성 제공자 오류: provider=%s", provider)
             warnings.append(exc.to_warning())
 
             # 알려진 클라우드 추론 오류는 Qwen으로 재시도하고, 그것도 실패하면 원문을 사용한다.
@@ -448,14 +435,19 @@ class FashionRecommendationPipeline:
                 except InvalidSearchInput:
                     raise
                 except Exception:
-                    reasoning_result = {"Target Image Description": raw_fallback}
-                    reasoning_provider = "raw_query"
-                    reasoning_status = "degraded"
+                    logger.exception("Qwen 대체 설명 생성 실패: 사용자 원문으로 검색합니다.")
+                    reasoning_result, reasoning_provider, reasoning_status = (
+                        _raw_query_fallback(raw_fallback)
+                    )
             else:
-                reasoning_result = {"Target Image Description": raw_fallback}
-                reasoning_provider = "raw_query"
-                reasoning_status = "degraded"
+                reasoning_result, reasoning_provider, reasoning_status = (
+                    _raw_query_fallback(raw_fallback)
+                )
         except Exception:
+            logger.exception(
+                "목표 상품 설명 생성 실패: provider=%s, 사용자 원문으로 검색합니다.",
+                provider,
+            )
             # 기타 예외는 Qwen 재시도 없이 원문 검색으로 낮추고 경고를 응답에 남긴다.
             warnings.append(
                 ReasoningWarning(
@@ -464,32 +456,16 @@ class FashionRecommendationPipeline:
                     message="추론에 실패해 원문으로 검색했습니다.",
                 )
             )
-            reasoning_result = {"Target Image Description": raw_fallback}
-            reasoning_provider = "raw_query"
-            reasoning_status = "degraded"
+            reasoning_result, reasoning_provider, reasoning_status = (
+                _raw_query_fallback(raw_fallback)
+            )
 
         return reasoning_result, reasoning_provider, reasoning_status, warnings
 
-    # 질의 벡터와 검색 범위 → similarity가 포함된 후보 목록. 최종 속성 후처리는 호출자가 수행한다.
-    def _search_vectors(
-        self,
-        embedding: list[float],
-        match_count: int,
-        table_filter: str | None,
-        category2_filter: str | None,
-        category2_keyword_filter: str | None,
-        fabric_embedding: list[float] | None = None,
-    ) -> list[dict[str, Any]]:
-        # 범위가 없으면 DB가 세 테이블의 후보를 합쳐 최종 정렬한다. RPC는 한 번만 호출한다.
-        # 정상 0건은 빈 목록으로 반환하고, DB 오류는 예외로 전달한다.
-        return self.vector_search.search_approximate(
-            embedding=embedding,
-            match_count=match_count,
-            table_filter=table_filter,
-            category2_filter=category2_filter,
-            category2_keyword_filter=category2_keyword_filter,
-            fabric_embedding=fabric_embedding,
-        )
+
+def _raw_query_fallback(text: str) -> tuple[dict[str, Any], str, str]:
+    """원문 검색으로 전환할 때 설명·제공자·상태를 함께 정한다."""
+    return {"Target Image Description": text}, "raw_query", "degraded"
 
 
 # '이 사진처럼' 같은 표현의 존재를 정규식으로 검사한다. 모델이 의미를 판정하는 단계는 아니다.
@@ -506,79 +482,6 @@ def _has_exact_metadata_filters(attributes: dict[str, Any]) -> bool:
     )
 
 
-# [이전 방식 비교 실험용] 현재 운영 검색에서는 호출하지 않는다.
-# DB에서 받은 상품 벡터를 Python에서 계산하던 경로를 재현한다.
-# 현재 운영 검색의 점수 계산·정렬은 DB의 exact/approximate RPC가 담당한다.
-def _rank_stored_gemini_vectors(
-    embedding: list[float],
-    rows: list[dict[str, Any]],
-    top_k: int,
-    fabric_embedding: list[float] | None = None,
-    fabric_weight: float = 0.2,  # 최종 점수 = 0.8 × 이미지 유사도 + 0.2 × fabric 유사도
-) -> list[dict[str, Any]]:
-    # 각 행의 상품 이미지 벡터와 질의 벡터를 비교한다. 여기서는 HNSW를 사용하지 않는다.
-    image_weight = 1.0 - fabric_weight if fabric_embedding is not None else 1.0
-    query = np.asarray(embedding, dtype=np.float32)
-
-    # query는 길이 D인 벡터, vectors는 상품 수 N × 차원 D의 행렬이다.
-    vectors = np.asarray(
-        [_parse_stored_vector(row.get("gemini_image_embedding_768")) for row in rows],
-        dtype=np.float32,
-    )
-
-    # 벡터의 길이 차이를 제거한 코사인 유사도: 내적 / (두 벡터의 크기 곱).
-    query_norm = float(np.linalg.norm(query))
-    row_norms = np.linalg.norm(vectors, axis=1)
-    denom = row_norms * query_norm
-
-    # 영벡터가 있을 때 0으로 나누지 않도록 분모를 보호한다. 영벡터의 내적은 0으로 남는다.
-    denom[denom == 0] = 1.0
-    image_scores = (vectors @ query) / denom
-
-    if fabric_embedding is not None:
-        fq = np.asarray(fabric_embedding, dtype=np.float32)
-        fq_norm = float(np.linalg.norm(fq))
-        fabric_vectors = []
-        for row in rows:
-            raw = row.get("gemini_fabric_text_embedding_768")
-            try:
-                fabric_vectors.append(_parse_stored_vector(raw))
-            except Exception:
-                # 소재 벡터가 없으면 소재 점수는 0이며 이미지 가중치를 1로 되돌리지는 않는다.
-                fabric_vectors.append([0.0] * len(fq))
-        fv = np.asarray(fabric_vectors, dtype=np.float32)
-        fv_norms = np.linalg.norm(fv, axis=1)
-        fdenom = fv_norms * fq_norm
-        fdenom[fdenom == 0] = 1.0
-        fabric_scores = (fv @ fq) / fdenom
-        final_scores = image_weight * image_scores + fabric_weight * fabric_scores
-    else:
-        final_scores = image_scores
-
-    # argsort는 작은 점수부터 정렬하므로 뒤집어 높은 점수의 상품 인덱스만 선택한다.
-    ranked_indices = np.argsort(final_scores)[::-1][:top_k]
-    # 순위 계산이 끝난 큰 벡터는 결과에서 빼고 상품 정보와 최종 점수만 남긴다.
-    exclude = {"gemini_image_embedding_768", "gemini_fabric_text_embedding_768"}
-    return [
-        {
-            **{k: v for k, v in rows[int(i)].items() if k not in exclude},
-            "similarity": float(final_scores[int(i)]),
-        }
-        for i in ranked_indices
-    ]
-
-
-def _parse_stored_vector(value: Any) -> list[float]:
-    # DB 응답의 배열과 JSON 문자열 두 형태를 같은 숫자 리스트로 맞춘다.
-    if isinstance(value, list):
-        return [float(item) for item in value]
-    if isinstance(value, str) and value.strip():
-        parsed = json.loads(value)
-        if isinstance(parsed, list):
-            return [float(item) for item in parsed]
-    raise ValueError("gemini_image_embedding_768 is missing or invalid.")
-
-
 __all__ = [
     "DEFAULT_RECOMMENDATION_COUNT",
     "DEFAULT_TOP_K",
@@ -586,7 +489,5 @@ __all__ = [
     "MAX_TOP_K",
     "PIPELINE_MODE",
     "VALID_TABLES",
-    "_google_translate",
-    "_rank_stored_gemini_vectors",
     "needs_reference_image",
 ]

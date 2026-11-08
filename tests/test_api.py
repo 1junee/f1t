@@ -172,7 +172,7 @@ def test_search_http_accepts_current_and_legacy_forms(monkeypatch, legacy_method
     class SearchService:
         def search(self, **kwargs):
             captured.update(kwargs)
-            return "black shirt", "검은 셔츠", {"provider": "gemini"}, []
+            return "black shirt", {"provider": "gemini"}, []
 
     monkeypatch.setattr(api.app.state, "search_service", SearchService(), raising=False)
     data = {"query": "검은 셔츠", "provider": "gemini"}
@@ -184,6 +184,8 @@ def test_search_http_accepts_current_and_legacy_forms(monkeypatch, legacy_method
     finally:
         client.close()
     assert response.status_code == 200
+    assert "target_description_ko" not in response.json()
+    assert response.json()["target_description"] == "black shirt"
     assert captured["query"] == "검은 셔츠"
     assert "pipeline_method" not in captured
 

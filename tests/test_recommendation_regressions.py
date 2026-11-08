@@ -1,8 +1,10 @@
 """검색 범위와 장애 대체 경로를 실제 API 호출 없이 검증한다."""
+from threading import Lock
 from types import SimpleNamespace
 from unittest.mock import Mock
 from io import BytesIO
 import sys
+import urllib.request
 
 import numpy as np
 import pytest
@@ -15,7 +17,7 @@ from pipeline.target_description import target_description_generation as generat
 
 @pytest.fixture(autouse=True)
 def no_http_calls(monkeypatch):
-    monkeypatch.setattr(service.urllib.request, "urlopen", Mock(side_effect=AssertionError("HTTP is forbidden in regression tests")))
+    monkeypatch.setattr(urllib.request, "urlopen", Mock(side_effect=AssertionError("HTTP is forbidden in regression tests")))
 
 
 @pytest.mark.parametrize("attributes", [candidates.ParsedTextAttributes(), candidates.ParsedTextAttributes(category1="top")])
@@ -134,6 +136,7 @@ def pipeline_without_io():
     pipeline = service.FashionRecommendationPipeline.__new__(service.FashionRecommendationPipeline)
     pipeline._default_provider = "gemini"
     pipeline._client_cache = {}
+    pipeline._client_cache_lock = Lock()
     return pipeline
 
 
@@ -146,12 +149,11 @@ def test_search_passes_same_plan_scope_to_strict_and_rpc(monkeypatch, strict_row
     )
     monkeypatch.setattr(service, "extract_conservative_metadata", lambda **kwargs: extraction)
     pipeline._run_target_description_reasoning = Mock(return_value=({"Target Image Description": "summer pants"}, "gemini", "ok", []))
-    pipeline._translate = Mock(return_value="여름 바지")
     pipeline.retriever = SimpleNamespace(encode_text=lambda texts: np.array([[1.0, 0.0]]))
-    pipeline._search_vectors = Mock(return_value=[{"id": "p2", "similarity": 0.5}])
+    pipeline.vector_search = SimpleNamespace(search_approximate=Mock(return_value=[{"id": "p2", "similarity": 0.5}]))
     fetch = (Mock(side_effect=strict_rows) if isinstance(strict_rows, Exception) else
              Mock(return_value=(strict_rows, {"matched_count": len(strict_rows), "request_count": 1})))
-    pipeline.vector_search = SimpleNamespace(search_filtered_exact=fetch)
+    pipeline.vector_search.search_filtered_exact = fetch
     monkeypatch.setattr(service, "generate_query_recommendation_explanation", lambda **kwargs: SimpleNamespace(
         recommendation_reason="추천 설명", to_metadata=lambda: {},
     ))
@@ -159,29 +161,35 @@ def test_search_passes_same_plan_scope_to_strict_and_rpc(monkeypatch, strict_row
     if isinstance(strict_rows, Exception):
         with pytest.raises(RuntimeError, match="filtered RPC unavailable"):
             pipeline.search("여름 바지", **scope)
-        pipeline._search_vectors.assert_not_called()
+        pipeline.vector_search.search_approximate.assert_not_called()
         return
-    _, _, metadata, _ = pipeline.search("여름 바지", **scope)
+    _, metadata, _ = pipeline.search("여름 바지", **scope)
     timing = metadata["pipeline"]["timings"]
     assert timing["total_ms"] >= 0
     stages = {stage["id"]: stage for stage in timing["stages"]}
     assert set(stages) == {
-        "intent_extraction", "target_description", "search_plan", "translation",
+        "intent_extraction", "target_description", "search_plan",
         "embedding", "retrieval", "postprocess", "recommendation_explanation",
     }
     assert stages["intent_extraction"]["parallel_group"] == stages["target_description"]["parallel_group"]
-    assert stages["translation"]["parallel_group"] == stages["embedding"]["parallel_group"]
+    assert "translation" not in stages
+    assert stages["embedding"]["parallel_group"] == "encoding"
     assert all(stage["duration_ms"] >= 0 for stage in stages.values())
     for key, expected in scope.items():
         assert fetch.call_args.kwargs.get(key) == expected
     assert fetch.call_args.kwargs["match_count"] == service.DEFAULT_RECOMMENDATION_COUNT
     assert metadata["pipeline"]["retrieval_diagnostics"]["request_count"] == 1
     if not strict_rows:
-        assert metadata["pipeline"]["retrieval_diagnostics"]["fallback"]["reason"] == "no_strict_candidates"
+        diagnostics = metadata["pipeline"]["retrieval_diagnostics"]
+        assert diagnostics["scope"] == "strict_filtered_rpc"
+        assert diagnostics["fallback"]["reason"] == "no_strict_candidates"
+        assert diagnostics["fallback"]["scope"] == "approximate_rpc"
+        assert diagnostics["fallback"]["request_count"] == 1
+        pipeline.vector_search.search_approximate.assert_called_once()
         for key, expected in scope.items():
-            assert pipeline._search_vectors.call_args.kwargs[key] == expected
+            assert pipeline.vector_search.search_approximate.call_args.kwargs[key] == expected
     else:
-        pipeline._search_vectors.assert_not_called()
+        pipeline.vector_search.search_approximate.assert_not_called()
         assert metadata["pipeline"]["prefetch_count"] == service.DEFAULT_RECOMMENDATION_COUNT
 
 
@@ -227,13 +235,16 @@ def test_invalid_input_from_qwen_fallback_is_preserved():
         run_reasoning(pipeline)
 
 
-def test_provider_initialization_failure_uses_fallback():
+def test_provider_initialization_failure_uses_fallback(caplog):
     pipeline = pipeline_without_io()
     pipeline._get_reasoning_client = Mock(side_effect=RuntimeError("missing provider configuration"))
     result, provider, status, warnings = run_reasoning(pipeline)
     assert result["Target Image Description"] == "pizza"
     assert (provider, status) == ("raw_query", "degraded")
     assert warnings
+    assert any(record.exc_info for record in caplog.records)
+    assert "missing provider configuration" in caplog.text
+    assert all("missing provider configuration" not in warning.message for warning in warnings)
 
 
 def test_known_provider_initialization_failure_can_use_qwen():
@@ -327,10 +338,9 @@ def test_search_embeds_only_successfully_extracted_fabric(monkeypatch, payload, 
     mock_intent_model(monkeypatch, payload)
     pipeline = pipeline_without_io()
     pipeline._run_target_description_reasoning = Mock(return_value=({"Target Image Description": "a cotton shirt"}, "gemini", "ok", []))
-    pipeline._translate = Mock(return_value="면 셔츠")
     encode = Mock(return_value=np.array([[1.0, 0.0]]))
     pipeline.retriever = SimpleNamespace(encode_text=encode)
-    pipeline._search_vectors = Mock(return_value=[{"id": "p2", "similarity": 0.5}])
+    pipeline.vector_search = SimpleNamespace(search_approximate=Mock(return_value=[{"id": "p2", "similarity": 0.5}]))
     monkeypatch.setattr(service, "generate_query_recommendation_explanation", lambda **kwargs: SimpleNamespace(
         recommendation_reason="추천 설명", to_metadata=lambda: {},
     ))
@@ -340,10 +350,10 @@ def test_search_embeds_only_successfully_extracted_fabric(monkeypatch, payload, 
     if expected_fabric:
         assert [expected_fabric] in encoded_texts
         assert encode.call_count == 2
-        assert pipeline._search_vectors.call_args.kwargs["fabric_embedding"] == [1.0, 0.0]
+        assert pipeline.vector_search.search_approximate.call_args.kwargs["fabric_embedding"] == [1.0, 0.0]
     else:
         assert encode.call_count == 1
-        assert pipeline._search_vectors.call_args.kwargs["fabric_embedding"] is None
+        assert pipeline.vector_search.search_approximate.call_args.kwargs["fabric_embedding"] is None
 
 @pytest.mark.parametrize("provider,intent_override,description_override,expected", [
     ("gemini", None, None, ("gemini", "gemini")),
@@ -361,12 +371,11 @@ def test_role_provider_selection(monkeypatch, provider, intent_override, descrip
     monkeypatch.setattr(service, "extract_conservative_metadata", extraction)
     pipeline._run_target_description_reasoning = Mock(return_value=(
         {"Target Image Description": "shirt"}, "raw_query", "degraded", []))
-    pipeline._translate = Mock(return_value="셔츠")
     pipeline.retriever = SimpleNamespace(encode_text=lambda texts: np.array([[1.0, 0.0]]))
-    pipeline._search_vectors = Mock(return_value=[])
+    pipeline.vector_search = SimpleNamespace(search_approximate=Mock(return_value=[]))
     monkeypatch.setattr(service, "generate_query_recommendation_explanation", lambda **kwargs: SimpleNamespace(
         recommendation_reason="", to_metadata=lambda: {}))
-    _, _, metadata, _ = pipeline.search("셔츠", provider=provider,
+    _, metadata, _ = pipeline.search("셔츠", provider=provider,
         intent_provider=intent_override, target_description_provider=description_override)
     assert extraction.call_args.kwargs["provider"] == expected[0]
     assert pipeline._run_target_description_reasoning.call_args.kwargs["provider"] == expected[1]
@@ -424,7 +433,7 @@ def test_recommendation_prompt_keeps_original_request_without_rule_detail_hint()
     from pipeline.target_description import recommendation_explanation as explanation
     prompt = explanation._build_gemini_recommendation_reason_prompt(
         query="리본 없는 셔츠", parsed_attributes={"category1": "top"},
-        target_description_ko="리본이 없는 셔츠",
+        search_status="similarity", result_count=3, applied_filters={},
         target_description_reasoning={"Target Image Description": "shirt without a ribbon"},
         has_reference_image=False,
     )
@@ -432,5 +441,31 @@ def test_recommendation_prompt_keeps_original_request_without_rule_detail_hint()
     assert "detail_hint" not in prompt
     assert "Prioritize visible item details" not in prompt
     fallback = explanation.build_query_recommendation_explanation(
-        parsed_attributes={"category1": "top"}, target_description_ko="리본이 없는 셔츠")
+        search_status="similarity", result_count=3)
     assert fallback
+
+
+def test_qwen_fallback_failure_is_logged_without_exposing_details(caplog):
+    pipeline = pipeline_without_io()
+    pipeline._get_reasoning_client = Mock(side_effect=[
+        generation.ReasoningProviderError("limit", "한도", "요청 한도를 초과했습니다."),
+        RuntimeError("qwen initialization failed"),
+    ])
+    result, provider, status, warnings = run_reasoning(pipeline)
+    assert result["Target Image Description"] == "pizza"
+    assert (provider, status) == ("raw_query", "degraded")
+    assert "Qwen 대체 설명 생성 실패" in caplog.text
+    assert "qwen initialization failed" in caplog.text
+    assert all("qwen initialization failed" not in warning.message for warning in warnings)
+
+
+def test_known_qwen_failure_uses_raw_query_without_retry():
+    pipeline = pipeline_without_io()
+    pipeline._get_reasoning_client = Mock(side_effect=generation.ReasoningProviderError(
+        "provider_unavailable", "연결 오류", "초기화 실패",
+    ))
+    result, provider, status, warnings = run_reasoning(pipeline, provider="qwen")
+    assert result == {"Target Image Description": "pizza"}
+    assert (provider, status) == ("raw_query", "degraded")
+    assert len(warnings) == 1
+    pipeline._get_reasoning_client.assert_called_once_with("qwen")

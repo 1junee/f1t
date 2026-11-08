@@ -13,7 +13,7 @@ VLM 설명 생성과 Gemini 쿼리 임베딩 생성 시간은 측정에서 제�
 
 현재 운영은 정확 속성으로 필터링한 전체 후보를 DB 안에서 비교하고 상위 상품만 반환합니다. ID순 후보 상한을 적용하지 않으며, `matched_count`는 전체 일치 후보 수이고 반환 수가 아닙니다. 색상·소재는 정확 필터에서 제외하고 설명문·유사도 점수에 반영합니다. 이 문서의 과거 벤치마크 결과는 새 RPC의 측정 결과로 갱신하지 않았습니다.
 
-측정에는 저장된 속성으로 계획을 만드는 로컬 계산, DB 왕복, 재정렬·후처리가 포함됩니다. 모델 추출·설명 생성, 임베딩 생성, 한국어 번역·추천 이유 생성은 포함하지 않습니다. 실제 사용자가 선택한 카테고리 override를 재생하는 입력 필드는 현재 없으므로, 그 상호작용은 서비스 회귀 테스트에서 따로 확인합니다.
+측정에는 저장된 속성으로 계획을 만드는 로컬 계산, DB 왕복, 재정렬·후처리가 포함됩니다. 모델 추출·설명 생성, 임베딩 생성, 한국어 추천 이유 생성은 포함하지 않습니다. 실제 사용자가 선택한 카테고리 override를 재생하는 입력 필드는 현재 없으므로, 그 상호작용은 서비스 회귀 테스트에서 따로 확인합니다.
 
 소재 조건이 있는 질의는 운영 검색과 동일하게 fabric 텍스트도 Gemini 임베딩으로 변환해 `hybrid` 경로에 전달합니다. SQL 후보 재정렬과 HNSW RPC 모두 `0.8 × 이미지 + 0.2 × fabric` 점수 정책을 그대로 사용합니다.
 
@@ -104,7 +104,7 @@ JSON은 요약과 원본 표본을 함께 저장하고 같은 경로에 CSV도 �
 
 ## 근사 검색 요청·병합 구조 비교
 
-현재 운영 `FashionRecommendationPipeline._search_vectors()`는 범위가 없어도 DB에 한 번 요청하며, DB가 테이블별 후보를 병합·정렬합니다. 이전 구현은 `retrieval_request_comparison.py`의 `search_three_requests_legacy()`로 보존했습니다. 운영 코드에서는 이 실험 함수를 호출하지 않습니다.
+현재 운영 `SupabaseVectorSearchClient.search_approximate()`는 범위가 없어도 DB에 한 번 요청하며, DB가 테이블별 후보를 병합·정렬합니다. 이전 구현은 `retrieval_request_comparison.py`의 `search_three_requests_legacy()`로 보존했습니다. 운영 코드에서는 이 실험 함수를 호출하지 않습니다.
 
 ```python
 from pipeline.benchmarks.retrieval_request_comparison import search_three_requests_legacy
@@ -113,7 +113,7 @@ from pipeline.benchmarks.retrieval_request_comparison import search_three_reques
 # kwargs: embedding, match_count, table_filter, category2_filter,
 #         category2_keyword_filter, fabric_embedding
 old_rows = search_three_requests_legacy(pipeline.vector_search, **kwargs)
-new_rows = pipeline._search_vectors(**kwargs)
+new_rows = pipeline.vector_search.search_approximate(**kwargs)
 ```
 
 범위 없는 입력으로 기존 3회/현재 1회를 비교합니다. 위 예시는 호출법이며 반복 측정기는 아닙니다. 실제 paired 실험에서는 순서를 섞고 같은 벡터·필터·개수·가중치를 유지해 시간과 결과를 기록해야 합니다. 이전 함수의 전체 빈 결과 오류도 재현 목적으로 유지했으므로 정상 0건과 실제 장애는 별도 집계합니다. 단위 테스트는 호출 횟수·인자·병합·오류 계약을 검증하며 실제 성능 개선을 입증하지 않습니다. 상세 설계는 로컬 `experiments/06_retrieval_execution/PLAN.md`에 있습니다.

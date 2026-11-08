@@ -213,7 +213,7 @@ def search(
     service: FashionRecommendationPipeline = request.app.state.search_service
     try:
         with request_limiter.acquire():
-            target_description, target_description_ko, reasoning_metadata, raw_results = (
+            target_description, reasoning_metadata, raw_results = (
                 service.search(
                     query=normalized_query,
                     top_k=top_k,
@@ -251,7 +251,6 @@ def search(
         "provider": reasoning_metadata["provider"],
         "pipeline": reasoning_metadata.get("pipeline"),
         "target_description": target_description,
-        "target_description_ko": target_description_ko,
         "recommendation_reason": reasoning_metadata.get("recommendation_reason"),
         "reasoning": reasoning_metadata,
         "results": [

@@ -24,11 +24,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
+from pipeline.benchmarks.legacy_vector_ranking import _rank_stored_gemini_vectors
 from pipeline.env import load_pipeline_env
 from pipeline.recommendation_service import (
     VALID_TABLES,
     _has_exact_metadata_filters,
-    _rank_stored_gemini_vectors,
 )
 from pipeline.retrieval.candidate_selection import (
     METADATA_PREFETCH_LIMIT,

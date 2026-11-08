@@ -11,7 +11,7 @@ from pathlib import Path
 from time import perf_counter
 import urllib.request
 
-from pipeline.recommendation_service import _rank_stored_gemini_vectors
+from pipeline.benchmarks.legacy_vector_ranking import _rank_stored_gemini_vectors
 from pipeline.vector_db_client import SupabaseVectorSearchClient
 
 DESCRIPTION = "A plain white short-sleeve T-shirt."

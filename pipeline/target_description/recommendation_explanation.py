@@ -6,7 +6,7 @@ import re
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 from .target_description_generation import (
     GEMINI_MODEL_NAME,
@@ -30,20 +30,10 @@ FORBIDDEN_REASON_TERMS = (
 )
 
 
-ATTRIBUTE_LABELS = {
-    "category1": "카테고리",
-    "color": "색상",
-    "fabric": "소재",
-    "sleeve": "소매",
-    "length": "기장",
-    "sex": "성별",
-    "season": "계절",
-    "stretch": "신축성",
-    "thickness": "두께",
-    "fit": "핏",
-}
-
 ATTRIBUTE_VALUE_LABELS = {
+    "sex": {"male": "남성", "female": "여성", "unisex": "남녀공용"},
+    "season": {"spring": "봄", "summer": "여름", "fall": "가을", "winter": "겨울"},
+    "stretch": {"yes": "신축성 있음", "no": "신축성 없음"},
     "category1": {
         "top": "상의",
         "pants": "바지",
@@ -75,45 +65,7 @@ ATTRIBUTE_VALUE_LABELS = {
     },
 }
 
-DETAIL_LABELS = {
-    "hood": "후드",
-    "character": "캐릭터 그래픽",
-    "graphic": "그래픽 프린트",
-    "print": "프린트",
-    "pattern": "패턴",
-    "logo": "로고",
-}
-
-VALUE_ALIASES = {
-    "category1": {
-        "top": ("top", "상의"),
-        "pants": ("pants", "바지", "팬츠"),
-        "skirt": ("skirt", "스커트", "치마"),
-        "dress": ("dress", "one-piece", "원피스", "드레스"),
-        "one-piece": ("dress", "one-piece", "원피스", "드레스"),
-    },
-    "sleeve": {
-        "long": ("long", "긴소매", "긴팔"),
-        "short": ("short", "반소매", "반팔"),
-        "sleeveless": ("sleeveless", "민소매", "나시"),
-    },
-    "length": {
-        "long": ("long", "롱", "긴"),
-        "half": ("half", "미디", "중간"),
-        "short": ("short", "숏", "짧은", "미니"),
-    },
-    "fit": {
-        "slim": ("slim", "슬림"),
-        "regular": ("regular", "레귤러", "정핏"),
-        "loose": ("loose", "루즈", "여유"),
-        "oversized": ("oversized", "oversize", "오버사이즈", "오버핏"),
-    },
-    "thickness": {
-        "thin": ("thin", "얇음", "약간 얇음"),
-        "medium": ("medium", "보통"),
-        "thick": ("thick", "두꺼움", "약간두꺼움", "약간 두꺼움"),
-    },
-}
+SearchStatus = Literal["exact", "relaxed", "similarity", "no_results"]
 
 
 @dataclass(frozen=True)
@@ -140,42 +92,32 @@ class RecommendationExplanationResult:
         return metadata
 
 
-def attach_recommendation_explanations(
-    rows: list[dict[str, Any]],
-    parsed_attributes: dict[str, str] | None,
-    target_description_ko: str,
-) -> list[dict[str, Any]]:
-    # 상품별 속성을 대조하는 보조 경로다. 현재 /search는 아래의 요청 단위 설명을 사용한다.
-    return [
-        {
-            **row,
-            **build_recommendation_explanation(
-                row=row,
-                parsed_attributes=parsed_attributes or {},
-                target_description_ko=target_description_ko,
-            ),
-        }
-        for row in rows
-    ]
-
-
 def generate_query_recommendation_explanation(
     *,
     query: str,
     parsed_attributes: dict[str, str] | None,
-    target_description_ko: str,
+    search_status: SearchStatus,
+    result_count: int,
+    applied_filters: dict[str, str] | None = None,
     target_description_reasoning: dict[str, Any] | None = None,
     has_reference_image: bool = False,
     model_name: str | None = None,
     allow_model_call: bool = True,
 ) -> RecommendationExplanationResult:
-    # 실제 검색 결과 목록을 받지 않고, 요청 조건과 목표 설명으로 공통 추천 문구를 만든다.
-    # 모델 호출을 못 하더라도 응답할 수 있도록 규칙 기반 문구를 먼저 준비한다.
+    # 영문 목표 설명과 검색 상태를 사용한다. 개별 상품 적합성을 검증하는 기능은 아니다.
+    # 실제 적용한 정확 필터만 대체 문구에 넣고, 결과 없음/완화는 고정 안내를 사용한다.
     fallback = build_query_recommendation_explanation(
-        parsed_attributes=parsed_attributes,
-        target_description_ko=target_description_ko,
-        has_reference_image=has_reference_image,
+        search_status=search_status,
+        result_count=result_count,
+        applied_filters=applied_filters,
     )
+    if result_count == 0 or search_status in {"no_results", "relaxed"}:
+        return RecommendationExplanationResult(
+            recommendation_reason=fallback,
+            method="deterministic_search_status",
+            uses_additional_model_call=False,
+            fallback_used=False,
+        )
     model_name = resolve_recommendation_reason_model(model_name)
     # 모델 호출을 끈 경우와 키가 없는 경우에는 네트워크 요청 없이 대체 문구를 반환한다.
     if not allow_model_call:
@@ -201,7 +143,9 @@ def generate_query_recommendation_explanation(
         prompt = _build_gemini_recommendation_reason_prompt(
             query=query,
             parsed_attributes=parsed_attributes or {},
-            target_description_ko=target_description_ko,
+            search_status=search_status,
+            result_count=result_count,
+            applied_filters=applied_filters or {},
             target_description_reasoning=target_description_reasoning or {},
             has_reference_image=has_reference_image,
         )
@@ -231,48 +175,30 @@ def generate_query_recommendation_explanation(
 
 
 def build_query_recommendation_explanation(
-    parsed_attributes: dict[str, str] | None,
-    target_description_ko: str,
-    has_reference_image: bool = False,
+    *,
+    search_status: SearchStatus,
+    result_count: int,
+    applied_filters: dict[str, str] | None = None,
 ) -> str:
-    # API 없이 속성과 문장 템플릿만으로 만드는 대체 문구다.
-    attributes = parsed_attributes or {}
-    target = target_description_ko.strip()
-    conditions = _condition_phrases(attributes, target)
-    condition_text = _join_korean_phrases(conditions)
-
-    if has_reference_image:
-        # 이미지에서 유지하려는 특징을 앞 문장에 넣고, 같은 조건을 뒤에서 중복하지 않게 한다.
-        image_focus = _reference_image_focus(attributes)
-        condition_text = _join_korean_phrases(
-            _conditions_without_reference_focus(conditions, image_focus)
+    """번역이나 키워드 추측 없이 실제 검색 상태를 한국어로 안내한다."""
+    if result_count == 0 or search_status == "no_results":
+        return "이번 검색에서 추천할 상품을 찾지 못했습니다."
+    if search_status == "relaxed":
+        return (
+            "요청 조건에 정확히 일치하는 상품이 없어, "
+            "일부 조건을 완화해 유사한 아이템을 검색했습니다."
         )
-        if condition_text:
-            opening = (
-                f"기준 이미지의 {image_focus} 느낌은 유지하면서, "
-                f"요청하신 {condition_text} 조건에 맞는 아이템을 찾았습니다."
-            )
-        else:
-            opening = (
-                f"기준 이미지의 {image_focus} 느낌을 바탕으로 "
-                "요청에 맞는 아이템을 찾았습니다."
-            )
-    elif condition_text:
-        opening = (
-            f"요청하신 {condition_text} 조건에 맞는 아이템을 중심으로 "
-            "찾았습니다."
-        )
-    elif target:
-        opening = f"요청하신 '{target}' 스타일에 맞는 아이템을 중심으로 찾았습니다."
-    else:
-        opening = "요청하신 스타일에 맞는 아이템을 중심으로 찾았습니다."
-
-    closing = _style_reason_sentence(
-        attributes,
-        target,
-        has_reference_image,
-    )
-    return f"{opening} {closing}"
+    if search_status == "exact":
+        # 색상·소재는 의미 유사도 대상이다. 실제 DB에 적용한 정확 필터만 이름을 붙인다.
+        conditions = [
+            ATTRIBUTE_VALUE_LABELS[field][value]
+            for field, value in (applied_filters or {}).items()
+            if value in ATTRIBUTE_VALUE_LABELS.get(field, {})
+        ]
+        if conditions:
+            return f"{', '.join(conditions)} 조건을 적용해 검색했습니다."
+        return "설정한 속성 조건을 적용해 검색했습니다."
+    return "입력하신 요청을 바탕으로 유사한 아이템을 검색했습니다."
 
 
 def resolve_recommendation_reason_model(model_name: str | None = None) -> str:
@@ -290,7 +216,9 @@ def _build_gemini_recommendation_reason_prompt(
     *,
     query: str,
     parsed_attributes: dict[str, str],
-    target_description_ko: str,
+    search_status: SearchStatus,
+    result_count: int,
+    applied_filters: dict[str, str],
     target_description_reasoning: dict[str, Any],
     has_reference_image: bool,
 ) -> str:
@@ -309,7 +237,9 @@ def _build_gemini_recommendation_reason_prompt(
         "user_query": query,
         "has_reference_image": has_reference_image,
         "extracted_attributes": parsed_attributes,
-        "target_description_ko": target_description_ko,
+        "search_status": search_status,
+        "result_count": result_count,
+        "applied_filters": applied_filters,
         "reasoning_context": reasoning_context,
     }
     return (
@@ -319,8 +249,9 @@ def _build_gemini_recommendation_reason_prompt(
         "Rules:\n"
         "1. Korean only, exactly two natural sentences.\n"
         "2. Sentence 1 summarizes the user's requested condition or occasion.\n"
-        "3. Sentence 2 explains why the results fit, using mood, details, and use case.\n"
-        "4. Do not explain individual products.\n"
+        "3. Sentence 2 describes the search approach, not unverified product suitability.\n"
+        "4. Product rows are not provided. Do not claim returned products satisfy all requested conditions.\n"
+        "Only applied_filters were enforced exactly; other attributes describe search intent.\n"
         "5. Do not mention: Target Description, metadata, vector, DB, candidate products, image features.\n\n"
         f"Input context:\n{json.dumps(payload, ensure_ascii=False, indent=2)}"
     )
@@ -408,260 +339,3 @@ def _clean_generated_reason(text: str) -> str:
 
 def _sentence_count(text: str) -> int:
     return len(re.findall(r"[.!?。]|[다요죠군요습니다]\.", text))
-
-
-def build_recommendation_explanation(
-    row: dict[str, Any],
-    parsed_attributes: dict[str, str],
-    target_description_ko: str,
-) -> dict[str, Any]:
-    # 개별 상품 데이터가 주어지는 경우, 요청 속성과 일치한 항목을 설명 근거로 모은다.
-    matched_attributes = [
-        {
-            "field": field,
-            "label": ATTRIBUTE_LABELS.get(field, field),
-            "value": _display_value(row.get(field), expected),
-        }
-        for field, expected in parsed_attributes.items()
-        if expected and _matches_attribute(row.get(field), field, expected)
-    ]
-
-    if matched_attributes:
-        matched_text = ", ".join(
-            f"{attribute['label']} {attribute['value']}"
-            for attribute in matched_attributes[:3]
-        )
-        reason = (
-            f"요청하신 {matched_text} 조건과 잘 맞고, "
-            "전체적인 스타일도 요청한 분위기와 잘 어울려 추천했어요."
-        )
-    elif target_description_ko.strip():
-        reason = (
-            "요청하신 스타일과 분위기가 잘 맞는 아이템이라 추천했어요."
-        )
-    else:
-        reason = "입력한 요청과 전체적인 분위기가 잘 맞는 아이템이라 추천했어요."
-
-    return {
-        "recommendation_reason": reason,
-        "recommendation_reason_details": matched_attributes,
-    }
-
-
-def _matches_attribute(row_value: Any, field: str, expected: str) -> bool:
-    row_text = _normalize(row_value)
-    if not row_text:
-        return False
-
-    variants = VALUE_ALIASES.get(field, {}).get(expected.lower(), (expected,))
-    # 영어 속성명과 한국어 저장값 등의 별칭 중 하나가 상품 값에 포함되는지 확인한다.
-    return any(_normalize(variant) in row_text for variant in variants)
-
-
-def _display_value(row_value: Any, fallback: str) -> str:
-    if isinstance(row_value, list):
-        values = [str(value).strip() for value in row_value if str(value).strip()]
-        return ", ".join(values) if values else fallback
-    return str(row_value or fallback).strip()
-
-
-def _attribute_phrase(field: str, value: str) -> str:
-    label = ATTRIBUTE_LABELS.get(field, field)
-    mapped_value = ATTRIBUTE_VALUE_LABELS.get(field, {}).get(value)
-    if mapped_value and field != "category1":
-        return mapped_value
-    display_value = mapped_value or value
-    return f"{label} {display_value}"
-
-
-def _condition_phrases(
-    attributes: dict[str, str],
-    target_description_ko: str,
-) -> list[str]:
-    phrases: list[str] = []
-    category = _normalize(attributes.get("category1"))
-    sleeve = _normalize(attributes.get("sleeve"))
-
-    color = attributes.get("color")
-    if color:
-        phrases.append(_color_phrase(color))
-
-    if attributes.get("fabric"):
-        phrases.append(f"{attributes['fabric']} 소재")
-
-    if category == "top":
-        # 상의는 소매, 하의·원피스는 기장 중심으로 한국어 조건을 조합한다.
-        phrases.append(_top_phrase(sleeve, target_description_ko))
-        fit = _attribute_condition_phrase("fit", attributes.get("fit"))
-        if fit:
-            phrases.append(fit)
-    elif category in {"pants", "skirt", "dress", "one-piece"}:
-        category_phrase = _category_condition_phrase(category)
-        length = _attribute_condition_phrase("length", attributes.get("length"))
-        thickness = _attribute_condition_phrase("thickness", attributes.get("thickness"))
-        fit = _attribute_condition_phrase("fit", attributes.get("fit"))
-        phrases.extend(
-            phrase
-            for phrase in (length, thickness, fit, category_phrase)
-            if phrase
-        )
-    else:
-        phrases.extend(
-            phrase
-            for phrase in (
-                _attribute_condition_phrase("sleeve", attributes.get("sleeve")),
-                _attribute_condition_phrase("length", attributes.get("length")),
-                _attribute_condition_phrase("thickness", attributes.get("thickness")),
-                _attribute_condition_phrase("fit", attributes.get("fit")),
-            )
-            if phrase
-        )
-        if category:
-            phrases.append(_category_condition_phrase(category))
-
-    phrases.extend(_condition_detail_phrases(target_description_ko))
-    return _dedupe_phrases(phrases)
-
-
-def _attribute_condition_phrase(field: str, value: str | None) -> str:
-    if not value:
-        return ""
-    mapped_value = ATTRIBUTE_VALUE_LABELS.get(field, {}).get(value, value)
-    if field == "sleeve" and value == "short":
-        return "반팔"
-    if field == "thickness" and value == "thin":
-        return "얇은 두께"
-    return mapped_value
-
-
-def _category_condition_phrase(category: str) -> str:
-    return {
-        "top": "상의",
-        "pants": "바지",
-        "skirt": "스커트",
-        "dress": "원피스",
-        "one-piece": "원피스",
-    }.get(category, category)
-
-
-def _top_phrase(sleeve: str, target_description_ko: str) -> str:
-    target = target_description_ko.lower()
-    garment = "티셔츠" if "티셔츠" in target or "t-shirt" in target else "상의"
-    if sleeve == "short":
-        return f"반팔 {garment}"
-    if sleeve == "long":
-        return f"긴 소매 {garment}"
-    if sleeve == "sleeveless":
-        return f"민소매 {garment}"
-    return garment
-
-
-def _color_phrase(value: str) -> str:
-    text = str(value).strip()
-    normalized = _normalize(text)
-    if normalized in {"bright", "light", "밝은색", "밝은 색"} or "밝" in normalized:
-        return "밝은 색감"
-    return f"{text} 색감"
-
-
-def _detail_phrases(description: str | None) -> list[str]:
-    # 모델 호출 없이 미리 정한 디테일 단어를 찾아 설명에 쓸 한국어 표현으로 바꾼다.
-    text = str(description or "").lower()
-    details: list[str] = []
-    if "character" in text or "캐릭터" in text:
-        details.append("캐릭터 그래픽")
-    elif "graphic" in text or "그래픽" in text:
-        details.append("그래픽 프린트")
-
-    for keyword, label in DETAIL_LABELS.items():
-        if keyword in {"character", "graphic"}:
-            continue
-        if keyword in text or label in text:
-            details.append(label)
-    return _dedupe_phrases(details)
-
-
-def _condition_detail_phrases(description: str | None) -> list[str]:
-    details = _detail_phrases(description)
-    return ["후드 디테일" if detail == "후드" else detail for detail in details if detail == "후드"]
-
-
-def _style_reason_sentence(
-    attributes: dict[str, str],
-    target_description_ko: str,
-    has_reference_image: bool,
-) -> str:
-    category = _normalize(attributes.get("category1"))
-    details = _detail_phrases(target_description_ko)
-    fit = _normalize(attributes.get("fit"))
-    thickness = _normalize(attributes.get("thickness"))
-
-    if "캐릭터 그래픽" in details:
-        return (
-            "전면 그래픽이 있어 캐릭터 있는 티셔츠라는 의도와 잘 어울리고, "
-            "캐주얼하고 귀여운 분위기의 데일리 아이템으로 활용하기 좋아 추천했습니다."
-        )
-    if "후드" in details and fit in {"wide", "loose", "oversized"}:
-        return (
-            "여유 있는 실루엣과 후드 디자인이 캐주얼한 분위기를 살려줘 "
-            "데일리로 입기 좋아 추천했습니다."
-        )
-    if category == "pants" and thickness == "thin":
-        if has_reference_image:
-            return (
-                "비슷한 실루엣을 바탕으로 더 가볍게 입기 좋은 팬츠를 "
-                "우선해서 추천했습니다."
-            )
-        return "가볍게 입기 좋은 두께감이라 편한 데일리 팬츠로 활용하기 좋아 추천했습니다."
-    if category in {"dress", "one-piece"}:
-        return "원피스 특유의 단정한 분위기를 살리면서도 요청한 디테일과 잘 맞아 추천했습니다."
-    if category == "top":
-        return "상체 실루엣과 디테일이 요청한 분위기와 잘 맞아 데일리 상의로 활용하기 좋아 추천했습니다."
-    return "요청한 조건과 전체적인 분위기가 잘 맞아 데일리 아이템으로 활용하기 좋아 추천했습니다."
-
-
-def _reference_image_focus(attributes: dict[str, str]) -> str:
-    length = _normalize(attributes.get("length"))
-    if length == "long":
-        return "긴 기장"
-    if length == "short":
-        return "짧은 기장"
-    if attributes.get("color"):
-        return "색감"
-    return "전체적인"
-
-
-def _conditions_without_reference_focus(
-    conditions: list[str],
-    image_focus: str,
-) -> list[str]:
-    if image_focus in {"긴 기장", "짧은 기장"}:
-        return [condition for condition in conditions if condition != image_focus]
-    return conditions
-
-
-def _join_korean_phrases(phrases: list[str]) -> str:
-    if not phrases:
-        return ""
-    if len(phrases) == 1:
-        return phrases[0]
-    return ", ".join(phrases[:-1]) + f", {phrases[-1]}"
-
-
-def _dedupe_phrases(phrases: list[str]) -> list[str]:
-    # 같은 표현은 한 번만 남기되 먼저 나타난 순서를 유지한다.
-    seen: set[str] = set()
-    deduped: list[str] = []
-    for phrase in phrases:
-        text = str(phrase or "").strip()
-        if not text or text in seen:
-            continue
-        seen.add(text)
-        deduped.append(text)
-    return deduped
-
-
-def _normalize(value: Any) -> str:
-    if isinstance(value, list):
-        value = " ".join(str(item) for item in value)
-    return re.sub(r"\s+", " ", str(value or "").lower()).strip()

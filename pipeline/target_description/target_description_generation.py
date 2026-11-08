@@ -13,6 +13,7 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from io import BytesIO
+from threading import Lock
 from typing import Any
 
 from PIL import Image
@@ -310,7 +311,7 @@ class GeminiReasoningClient:
             "Target Image Description": normalized_text,
         }
 
-    # 아래 번역·키워드 메서드는 보조 기능이다. 현재 검색의 번역은 서비스 모듈에서 수행한다.
+    # 아래 번역·키워드 메서드는 보조 기능이다. 현재 검색은 생성된 영문 목표 설명을 번역 없이 사용한다.
     def translate_to_english(self, text: str) -> str:
         normalized_text = text.strip()
         if not normalized_text:
@@ -702,6 +703,7 @@ class Qwen3VLReasoningClient:
         )
         self.processor = None
         self.model = None
+        self._load_lock = Lock()
 
     @property
     def provider_id(self) -> str:
@@ -789,62 +791,64 @@ class Qwen3VLReasoningClient:
         return build_target_description_prompt(manipulation_text, has_image)
 
     def _load(self) -> None:
-        # 실제 추론이 필요할 때 한 번 로드한다. 모델 파일은 로컬 캐시에 있어야 한다.
-        if self.processor is not None and self.model is not None:
-            return
+        # 첫 동시 요청의 중복 로딩을 방지한다. 실제 추론은 이 잠금 밖에서 수행한다.
+        with self._load_lock:
+            # 실제 추론이 필요할 때 한 번 로드한다. 모델 파일은 로컬 캐시에 있어야 한다.
+            if self.processor is not None and self.model is not None:
+                return
 
-        os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
-        os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+            os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+            os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
-        try:
-            import torch
-            from huggingface_hub import snapshot_download
-            from transformers import AutoProcessor
-        except Exception as exc:
-            raise ReasoningProviderError(
-                "qwen_unavailable",
-                "Qwen fallback 오류",
-                "Qwen fallback을 실행하지 못해 원문으로 검색했습니다.",
-                detail=str(exc),
-            ) from exc
+            try:
+                import torch
+                from huggingface_hub import snapshot_download
+                from transformers import AutoProcessor
+            except Exception as exc:
+                raise ReasoningProviderError(
+                    "qwen_unavailable",
+                    "Qwen fallback 오류",
+                    "Qwen fallback을 실행하지 못해 원문으로 검색했습니다.",
+                    detail=str(exc),
+                ) from exc
 
-        try:
-            model_path = snapshot_download(
-                repo_id=self.model_name,
-                local_files_only=True,
-            )
-            model_cls = self._resolve_model_class(model_path)
-            kwargs: dict[str, Any] = {
-                "device_map": self.device,
-                "trust_remote_code": True,
-            }
+            try:
+                model_path = snapshot_download(
+                    repo_id=self.model_name,
+                    local_files_only=True,
+                )
+                model_cls = self._resolve_model_class(model_path)
+                kwargs: dict[str, Any] = {
+                    "device_map": self.device,
+                    "trust_remote_code": True,
+                }
 
-            if self.device == "cpu" or not torch.cuda.is_available():
-                # 현재 구현은 CPU 또는 CUDA가 없는 환경에서 float32로 모델을 읽는다.
-                kwargs["dtype"] = torch.float32
-            else:
-                kwargs["dtype"] = torch.bfloat16
+                if self.device == "cpu" or not torch.cuda.is_available():
+                    # 현재 구현은 CPU 또는 CUDA가 없는 환경에서 float32로 모델을 읽는다.
+                    kwargs["dtype"] = torch.float32
+                else:
+                    kwargs["dtype"] = torch.bfloat16
 
-            self.processor = AutoProcessor.from_pretrained(
-                model_path,
-                local_files_only=True,
-                trust_remote_code=True,
-            )
-            self.model = model_cls.from_pretrained(
-                model_path,
-                local_files_only=True,
-                **kwargs,
-            )
-            self.model.eval()
-        except Exception as exc:
-            self.processor = None
-            self.model = None
-            raise ReasoningProviderError(
-                "qwen_unavailable",
-                "Qwen fallback 오류",
-                "Qwen fallback 모델을 불러오지 못해 원문으로 검색했습니다.",
-                detail=str(exc),
-            ) from exc
+                self.processor = AutoProcessor.from_pretrained(
+                    model_path,
+                    local_files_only=True,
+                    trust_remote_code=True,
+                )
+                self.model = model_cls.from_pretrained(
+                    model_path,
+                    local_files_only=True,
+                    **kwargs,
+                )
+                self.model.eval()
+            except Exception as exc:
+                self.processor = None
+                self.model = None
+                raise ReasoningProviderError(
+                    "qwen_unavailable",
+                    "Qwen fallback 오류",
+                    "Qwen fallback 모델을 불러오지 못해 원문으로 검색했습니다.",
+                    detail=str(exc),
+                ) from exc
 
     def _resolve_model_class(self, model_path: str):
         try:

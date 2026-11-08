@@ -10,7 +10,7 @@ from backend.request_limits import RequestLimiter
 @pytest.fixture
 def client(monkeypatch):
     monkeypatch.setattr(api, 'request_limiter', RequestLimiter(max_concurrent=1, per_minute=1, per_day=10))
-    monkeypatch.setattr(api.app.state, 'search_service', SimpleNamespace(search=lambda **kwargs: ('shirt', '셔츠', {'provider': 'gemini'}, [])), raising=False)
+    monkeypatch.setattr(api.app.state, 'search_service', SimpleNamespace(search=lambda **kwargs: ('shirt', {'provider': 'gemini'}, [])), raising=False)
     monkeypatch.setattr(api, 'extract_conservative_metadata', lambda **kwargs: SimpleNamespace(attributes=SimpleNamespace(to_dict=lambda: {})))
     return TestClient(api.app)
 

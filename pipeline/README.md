@@ -37,7 +37,6 @@
 [3단계] 테이블·조건·후보 수를 정하는 검색 계획 생성 (DB 조회 전)
     ↓
 [4단계 — 병렬]
-  ├→ 목표 설명문 한국어 번역
   ├→ 목표 설명문 Gemini Embedding 인코딩
   └→ (fabric 속성 있을 시) fabric 임베딩 인코딩
     ↓
@@ -63,7 +62,7 @@ API 응답 반환
 - 요청에 fabric 속성이 없으면 이미지 유사도만 사용
 - 요청에 fabric 속성이 있는데 상품의 소재 벡터가 없으면 소재 점수는 0으로 계산
 
-운영 검색의 가중치는 Supabase RPC 함수 `filtered_exact_vector_search_768`과 `approximate_vector_search_768`에서 적용합니다. `recommendation_service.py`의 `_rank_stored_gemini_vectors(fabric_weight=0.2)`는 기존 REST 검색을 비교하는 벤치마크용으로 남아 있으며 운영의 정확 필터 경로에서는 호출하지 않습니다.
+운영 검색의 가중치는 Supabase RPC 함수 `filtered_exact_vector_search_768`과 `approximate_vector_search_768`에서 적용합니다. `benchmarks/legacy_vector_ranking.py`의 `_rank_stored_gemini_vectors(fabric_weight=0.2)`는 기존 REST 검색을 비교하는 벤치마크용으로 남아 있으며 운영의 정확 필터 경로에서는 호출하지 않습니다.
 
 ### 실제 검색 경로
 
@@ -127,7 +126,6 @@ cd frontend && npm run dev
 {
   "provider": "gemini",
   "target_description": "Oversized black long-sleeve hoodie",
-  "target_description_ko": "오버사이즈 블랙 긴팔 후드티",
   "recommendation_reason": "요청하신 긴 소매와 오버사이즈 핏 조건에 맞는 후드 상의를 중심으로 찾았습니다. 여유 있는 실루엣과 후드 디테일이 캐주얼한 분위기를 살려줘 데일리로 입기 좋아 추천했습니다.",
   "pipeline": {
     "id": "intent_text_table_narrowing",
@@ -243,3 +241,24 @@ uv pip install --python .venv/bin/python -r requirements-dev.txt
 - `search_filtered_exact()` → `filtered_exact_vector_search_768`: 속성 필터 후 일치 후보 전체의 벡터 점수를 계산합니다.
 - `search_approximate()` → `approximate_vector_search_768`: 이미지 벡터 근사 후보 검색 후 선택적으로 소재 점수를 반영합니다. 실제 인덱스 사용은 DB 실행 계획에 따릅니다.
 - 기존 DB 함수 `match_fashion_items_filtered_768`, `match_fashion_items_768`은 기존 배포와 다른 호출의 호환성을 위해 유지합니다. 새 코드 배포 전에 새 이름의 SQL 함수가 설치되어 있어야 합니다.
+
+
+### 번역 제거와 검색 상태 안내
+
+목표 설명문은 영문 그대로 검색 임베딩과 한국어 추천 이유 모델의 입력에 사용합니다. 별도 번역 요청은 하지 않으며 `/search` 응답의 `target_description_ko` 필드는 제거했습니다. Python 서비스 반환값도 `(target_description, metadata, results)` 세 항목입니다. 이전 필드를 사용하는 외부 소비자는 업데이트해야 합니다.
+
+추천 이유 모델은 한국어로 출력하도록 지시합니다. 모델 실패 시에는 번역문 키워드가 아니라 실제 적용된 정확 속성 필터와 최종 검색 상태로 대체 문구를 만듭니다. `pipeline.search_status`는 `exact`, `similarity`, `relaxed`, `no_results` 중 하나입니다. `exact`도 색상·소재 등 모든 요청 조건을 보장한다는 뜻은 아닙니다.
+
+- `exact`: 적용한 정확 속성 조건을 안내합니다. 상품의 모든 특성이 맞는다고 단정하지 않습니다.
+- `similarity`: 입력 요청을 바탕으로 유사 상품을 검색했다고 안내합니다.
+- `relaxed`: 조건 완화를 고정 문구로 안내하고 추천 이유 모델을 호출하지 않습니다.
+- `no_results`: 후처리 이후 최종 결과가 없음을 안내하고 추천 이유 모델을 호출하지 않습니다. 조건 완화 후 0건이어도 이 상태가 우선합니다.
+
+두 번째 병렬 묶음은 설명 임베딩과 선택적 소재 임베딩입니다. 소재 조건이 없으면 설명 임베딩만 실행합니다. 검색의 필터·벡터 계산 방식은 이 변경으로 바뀌지 않습니다.
+
+
+### 설명 생성 클라이언트의 동시 초기화
+
+`_client_cache_lock`은 같은 파이프라인 인스턴스의 제공자 클라이언트 확인·생성·저장을 보호합니다. 생성이 실패하면 캐시에 저장하지 않고 잠금을 해제하므로 이후 요청에서 재시도할 수 있습니다. `run()` 호출은 잠금 밖에서 수행합니다. Qwen은 실제 모델 로딩이 지연되므로 클라이언트 내부 `_load_lock`으로 첫 모델 로딩도 별도로 보호합니다. 이 잠금은 인스턴스 내부 스레드에만 적용되며 다른 프로세스나 의도 추출용 별도 클라이언트까지 모델을 공유하지 않습니다.
+
+동시 초기화와 실패 후 재시도는 가짜 생성기로 검증했습니다. Gemini/OpenAI는 요청 본문을 호출마다 생성하는 구조입니다. 로컬 Qwen의 실제 동시 추론 안전성·최대 메모리 사용은 별도 부하 검증 대상이며, 초기화 잠금만으로 이를 보장하지 않습니다.
