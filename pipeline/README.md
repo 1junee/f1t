@@ -116,8 +116,11 @@ cd frontend && npm run dev
 | `top_k` | 선택 | 결과 수 (기본값 10) |
 | `table` | 선택 | `musinsa_top_clothes` / `musinsa_pants` / `musinsa_skirt_dress` |
 | `category2_keyword` | 선택 | 세부 카테고리 키워드 (예: `원피스`, `스커트`) |
-| `pipeline_method` | 선택 | `intent` (기본값) |
-| `provider` | 선택 | `gemini` (기본값) |
+| `provider` | 선택 | 두 작업의 공통 제공자: `gemini` / `openai` / `qwen`; 미지정 시 `VLM_PROVIDER`, 없으면 `gemini` |
+| `intent_provider` | 선택 | 메타데이터 추출 제공자만 변경; 미지정 시 공통 제공자 |
+| `target_description_provider` | 선택 | 목표 상품 설명 생성 제공자만 변경; 미지정 시 공통 제공자 |
+
+검색은 단일 의도 기반 흐름으로 실행합니다. 기존 `pipeline_method` 폼 필드는 더 이상 사용하지 않으며, 전송해도 무시됩니다.
 
 응답 예시:
 ```json
@@ -214,3 +217,13 @@ HNSW 경로에서 소재 벡터는 이미지 HNSW가 고른 후보 집합을 재
 
 **3. 임베딩 빌드**:  
 배포 환경에서는 이미 구축된 Supabase 테이블과 RPC를 사용합니다. 임베딩 생성 스크립트와 실험 산출물은 이 배포용 스냅샷에서 제외했습니다.
+
+### 역할별 제공자 선택
+
+`provider=openai`는 메타데이터 추출과 목표 상품 설명 생성을 모두 OpenAI로 실행한다. 여기에 `intent_provider=gemini`를 추가하면 메타데이터만 Gemini로 실행한다. 각 역할은 같은 제공자를 사용해도 별도 프롬프트와 호출을 유지한다. 메타데이터에는 동일한 보수적 속성 추출·정규화 규칙을 적용한다.
+
+Gemini 추출 모델은 기존 `GEMINI_INTENT_MODEL` 등 설정을 유지한다. OpenAI는 `OPENAI_MODEL`, Qwen은 `QWEN_FALLBACK_MODEL` / `QWEN3_VL_MODEL`을 사용한다. Qwen은 로컬 모델 의존성과 가중치가 필요하며 역할별 클라이언트가 별도로 로드될 수 있어 메모리 여유가 필요하다.
+
+응답의 `pipeline.providers.intent`와 `pipeline.providers.target_description`에 요청 제공자·실제 제공자·상태를 기록한다. 추출 실패는 기존대로 규칙 파서(`rule_based`)로 전환하고, 설명 생성은 기존 Qwen/원문 대체 정책을 유지한다. 최상위 `provider`는 기존처럼 설명 생성의 실제 제공자다.
+
+이 옵션은 `/search`의 두 추론 작업에만 적용한다. 임베딩, 추천 이유 생성, 별도 `/analyze`의 기본 설정은 변경하지 않는다. 역할별 지정은 API 폼 필드로 제공하며 화면에 별도 선택 메뉴는 추가하지 않았다.

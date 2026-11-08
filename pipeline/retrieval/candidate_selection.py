@@ -264,7 +264,7 @@ class ParallelTextAnalysis:
     # 검색용 속성과 설명문에 보탤 디테일을 따로 보관하는 분석 결과다.
     structured_attributes: ParsedTextAttributes
     detail_terms: str | None
-    detail_target_description: str | None
+    detail_hint: str | None
     intent_type: str
     lane_metadata: dict[str, Any]
 
@@ -285,8 +285,8 @@ class AttributeTextSearchPlan:
     user_filter_overrides: dict[str, str]
     intent_type: str
     analysis_lanes: dict[str, Any]
-    detail_target_description: str | None
-    extraction_metadata: dict[str, Any] | None = None
+    detail_hint: str | None
+    extraction_info: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         # 응답에서 검색 과정을 설명하기 위한 메타데이터이며 검색 실행 함수는 아니다.
@@ -320,11 +320,11 @@ class AttributeTextSearchPlan:
             ),
             "parsed_attributes": self.parsed_attributes.to_dict(),
             "analysis_lanes": self.analysis_lanes,
-            "detail_target_description": self.detail_target_description,
+            "detail_hint": self.detail_hint,
             "intent_extraction": {
-                "status": (self.extraction_metadata or {}).get("status", INTENT_EXTRACTION_STATUS),
-                "method": (self.extraction_metadata or {}).get("method", "rule_based_keyword_parser"),
-                "prompt_id": (self.extraction_metadata or {}).get("prompt_id"),
+                "status": (self.extraction_info or {}).get("status", INTENT_EXTRACTION_STATUS),
+                "method": (self.extraction_info or {}).get("method", "rule_based_keyword_parser"),
+                "prompt_id": (self.extraction_info or {}).get("prompt_id"),
                 "prompt": None,
                 "notes": [
                     "Conservative intent extraction retains only explicitly mentioned attributes.",
@@ -368,7 +368,7 @@ def analyze_text_query_in_parallel(query: str) -> ParallelTextAnalysis:
         structured_future = executor.submit(_parse_structured_attributes, normalized)
         detail_future = executor.submit(_parse_detail_description, normalized)
         structured_attributes = structured_future.result()
-        detail_terms, detail_target_description = detail_future.result()
+        detail_terms, detail_hint = detail_future.result()
 
     intent_type = _detect_intent_type(normalized, structured_attributes)
     # 두 작업이 끝난 뒤 결과를 합친다. 이 스레드 병렬화는 외부 모델 호출과 별개다.
@@ -383,10 +383,10 @@ def analyze_text_query_in_parallel(query: str) -> ParallelTextAnalysis:
                 "fit, color, fabric"
             ),
         },
-        "detail_target_description": {
-            "status": "filled" if detail_target_description else "empty",
+        "detail_hint": {
+            "status": "filled" if detail_hint else "empty",
             "terms": detail_terms,
-            "target_description": detail_target_description,
+            "target_description": detail_hint,
             "scope": (
                 "visible details for target-description generation: pattern, logo, "
                 "graphics, trim, pocket, zip, collar, hood, pleats, ribbon, lace"
@@ -401,7 +401,7 @@ def analyze_text_query_in_parallel(query: str) -> ParallelTextAnalysis:
     return ParallelTextAnalysis(
         structured_attributes=structured_attributes,
         detail_terms=detail_terms,
-        detail_target_description=detail_target_description,
+        detail_hint=detail_hint,
         intent_type=intent_type,
         lane_metadata=lane_metadata,
     )
@@ -412,17 +412,18 @@ def build_attribute_text_search_plan(
     top_k: int,
     has_image: bool = False,
     extracted_attributes: ParsedTextAttributes | None = None,
-    extraction_metadata: dict[str, Any] | None = None,
+    extraction_info: dict[str, Any] | None = None,
     table_filter: str | None = None,
     category2_filter: str | None = None,
     category2_keyword_filter: str | None = None,
 ) -> AttributeTextSearchPlan:
+
     # 성공한 VLM 결과는 빈 속성까지 존중한다. 규칙으로 제외된 조건을 되살리지 않는다.
     analysis = analyze_text_query_in_parallel(query)
     parsed = (
         extracted_attributes
         if extracted_attributes is not None
-        and (extraction_metadata or {}).get("status", "ok") == "ok"
+        and (extraction_info or {}).get("status", "ok") == "ok"
         else analysis.parsed_attributes
     )
     # 실패·미사용 시의 규칙 결과도 parsed에 들어 있으므로 여기서 다시 원문을 해석하지 않는다.
@@ -466,8 +467,8 @@ def build_attribute_text_search_plan(
         user_filter_overrides=user_overrides,
         intent_type=analysis.intent_type,
         analysis_lanes=analysis.lane_metadata,
-        detail_target_description=analysis.detail_target_description,
-        extraction_metadata=extraction_metadata,
+        detail_hint=analysis.detail_hint,
+        extraction_info=extraction_info,
     )
 
 

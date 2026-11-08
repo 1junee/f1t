@@ -311,21 +311,6 @@ class GeminiReasoningClient:
         }
 
     # 아래 번역·키워드 메서드는 보조 기능이다. 현재 검색의 번역은 서비스 모듈에서 수행한다.
-    def translate_to_korean(self, text: str) -> str:
-        normalized_text = text.strip()
-        if not normalized_text:
-            return ""
-
-        return self._generate(
-            prompt=(
-                "You are a fashion translator. Translate the following English fashion item description "
-                "into natural, fluent Korean as if written by a Korean fashion editor. "
-                "Keep brand names, English loan words commonly used in Korean fashion (e.g. 오버사이즈, 크루넥) as-is. "
-                "Do not summarize or omit any detail. Return ONLY the Korean translation.\n\n"
-                f"{normalized_text}"
-            ),
-        ).strip()
-
     def translate_to_english(self, text: str) -> str:
         normalized_text = text.strip()
         if not normalized_text:
@@ -622,21 +607,6 @@ class OpenAIReasoningClient:
                 detail=json.dumps(response_json, ensure_ascii=False)[:1000],
             ) from exc
 
-    def translate_to_korean(self, text: str) -> str:
-        normalized_text = text.strip()
-        if not normalized_text:
-            return ""
-
-        return self._generate(
-            prompt=(
-                "You are a fashion translator. Translate the following English fashion item description "
-                "into natural, fluent Korean as if written by a Korean fashion editor. "
-                "Keep brand names, English loan words commonly used in Korean fashion (e.g. 오버사이즈, 크루넥) as-is. "
-                "Do not summarize or omit any detail. Return ONLY the Korean translation.\n\n"
-                f"{normalized_text}"
-            ),
-        ).strip()
-
     def translate_to_english(self, text: str) -> str:
         normalized_text = text.strip()
         if not normalized_text:
@@ -789,21 +759,6 @@ class Qwen3VLReasoningClient:
             "Reflections": "",
             "Target Image Description": normalized_text,
         }
-
-    def translate_to_korean(self, text: str) -> str:
-        normalized_text = text.strip()
-        if not normalized_text:
-            return ""
-
-        return self._generate(
-            prompt=(
-                "Translate the following fashion search description fully and faithfully "
-                "to natural Korean. Do not summarize, omit details, or extract keywords. "
-                "Return ONLY the Korean translation, no explanations.\n\n"
-                f"{normalized_text}"
-            ),
-            image=None,
-        ).strip()
 
     def translate_to_english(self, text: str) -> str:
         normalized_text = text.strip()

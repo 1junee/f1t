@@ -12,7 +12,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from backend.request_limits import RequestLimiter
 from pipeline.env import load_pipeline_env
 from pipeline.recommendation_service import (
-    DEFAULT_PIPELINE_METHOD,
     DEFAULT_RECOMMENDATION_COUNT,
     FashionRecommendationPipeline,
     MAX_TOP_K,
@@ -173,7 +172,8 @@ def search(
     category2: str | None = Form(default=None),
     category2_keyword: str | None = Form(default=None),
     provider: str | None = Form(default=None),
-    pipeline_method: str = Form(default=DEFAULT_PIPELINE_METHOD),
+    intent_provider: str | None = Form(default=None),
+    target_description_provider: str | None = Form(default=None),
 ) -> dict[str, Any]:
     # multipart 폼의 빈 문자열을 정리하고, 모델 호출 전에 입력 범위를 검증한다.
     normalized_query = (query or "").strip()
@@ -192,6 +192,14 @@ def search(
     normalized_provider = (provider or os.getenv("VLM_PROVIDER", "gemini")).strip().lower()
     if normalized_provider not in {"gemini", "openai", "qwen"}:
         raise HTTPException(status_code=400, detail="Invalid provider. Use gemini, openai, or qwen.")
+
+    role_providers = {}
+    for name, value in (("intent_provider", intent_provider),
+                        ("target_description_provider", target_description_provider)):
+        normalized = value.strip().lower() if isinstance(value, str) else None
+        if normalized and normalized not in {"gemini", "openai", "qwen"}:
+            raise HTTPException(status_code=400, detail=f"Invalid {name}.")
+        role_providers[name] = normalized or None
 
     image_bytes, image_mime_type = read_image_upload(image)
 
@@ -215,7 +223,7 @@ def search(
                     category2_filter=category2_filter,
                     category2_keyword_filter=category2_keyword_filter,
                     provider=normalized_provider,
-                    pipeline_method=pipeline_method,
+                    **role_providers,
                 )
             )
     # 서비스 내부 예외를 HTTP 상태 코드로 바꾼다. 상세 원인은 서버 로그에 남긴다.

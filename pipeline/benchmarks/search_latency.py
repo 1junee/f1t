@@ -328,7 +328,7 @@ class HybridSearchRunner:
         })
         plan = build_attribute_text_search_plan(
             case.query, self.top_k, extracted_attributes=extracted,
-            extraction_metadata={"status": "ok"},
+            extraction_info={"status": "ok"},
         )
         attributes = plan.parsed_attributes.to_dict()
         prefilter_failed = False

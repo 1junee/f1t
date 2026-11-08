@@ -22,7 +22,7 @@ def no_http_calls(monkeypatch):
 def test_successful_intent_does_not_restore_rejected_keyword_filters(attributes):
     plan = candidates.build_attribute_text_search_plan(
         "긴팔 말고 반팔, 바지 말고 상의", top_k=3,
-        extracted_attributes=attributes, extraction_metadata={"status": "ok"},
+        extracted_attributes=attributes, extraction_info={"status": "ok"},
     )
     assert plan.parsed_attributes == attributes
     assert plan.table_filter == ("musinsa_top_clothes" if attributes.category1 else None)
@@ -30,7 +30,7 @@ def test_successful_intent_does_not_restore_rejected_keyword_filters(attributes)
 
 def test_failed_intent_still_uses_rule_fallback():
     plan = candidates.build_attribute_text_search_plan(
-        "긴팔 상의", top_k=3, extraction_metadata={"status": "degraded"},
+        "긴팔 상의", top_k=3, extraction_info={"status": "degraded"},
     )
     assert plan.parsed_attributes.sleeve == "long"
     assert plan.table_filter == "musinsa_top_clothes"
@@ -39,7 +39,7 @@ def test_failed_intent_still_uses_rule_fallback():
 def test_failed_intent_does_not_trust_stale_extracted_attributes():
     plan = candidates.build_attribute_text_search_plan(
         "긴팔 상의", top_k=3, extracted_attributes=candidates.ParsedTextAttributes(category1="pants"),
-        extraction_metadata={"status": "degraded"},
+        extraction_info={"status": "degraded"},
     )
     assert plan.parsed_attributes.sleeve == "long"
     assert plan.table_filter == "musinsa_top_clothes"
@@ -308,7 +308,7 @@ def test_actual_intent_extraction_preserves_explicit_semantic_attributes(monkeyp
     assert extracted.attributes.to_dict() == expected
     plan = candidates.build_attribute_text_search_plan(
         query, top_k=3, extracted_attributes=extracted.attributes,
-        extraction_metadata=extracted.to_metadata(),
+        extraction_info=extracted.to_metadata(),
     )
     assert plan.parsed_attributes.to_dict() == expected
     prompt = generate.call_args.kwargs["contents"][0]["parts"][0]["text"]
@@ -344,3 +344,66 @@ def test_search_embeds_only_successfully_extracted_fabric(monkeypatch, payload, 
     else:
         assert encode.call_count == 1
         assert pipeline._search_vectors.call_args.kwargs["fabric_embedding"] is None
+
+@pytest.mark.parametrize("provider,intent_override,description_override,expected", [
+    ("gemini", None, None, ("gemini", "gemini")),
+    ("openai", None, None, ("openai", "openai")),
+    ("qwen", None, None, ("qwen", "qwen")),
+    ("openai", "gemini", None, ("gemini", "openai")),
+    ("gemini", "openai", "qwen", ("openai", "qwen")),
+])
+def test_role_provider_selection(monkeypatch, provider, intent_override, description_override, expected):
+    pipeline = pipeline_without_io()
+    extraction = Mock(return_value=SimpleNamespace(
+        status="ok", attributes=candidates.ParsedTextAttributes(),
+        to_metadata=lambda: {"provider": expected[0], "status": "ok"},
+    ))
+    monkeypatch.setattr(service, "extract_conservative_metadata", extraction)
+    pipeline._run_target_description_reasoning = Mock(return_value=(
+        {"Target Image Description": "shirt"}, "raw_query", "degraded", []))
+    pipeline._translate = Mock(return_value="셔츠")
+    pipeline.retriever = SimpleNamespace(encode_text=lambda texts: np.array([[1.0, 0.0]]))
+    pipeline._search_vectors = Mock(return_value=[])
+    monkeypatch.setattr(service, "generate_query_recommendation_explanation", lambda **kwargs: SimpleNamespace(
+        recommendation_reason="", to_metadata=lambda: {}))
+    _, _, metadata, _ = pipeline.search("셔츠", provider=provider,
+        intent_provider=intent_override, target_description_provider=description_override)
+    assert extraction.call_args.kwargs["provider"] == expected[0]
+    assert pipeline._run_target_description_reasoning.call_args.kwargs["provider"] == expected[1]
+    assert metadata["pipeline"]["providers"]["target_description"] == {
+        "requested_provider": expected[1], "provider": "raw_query", "status": "degraded"}
+
+
+@pytest.mark.parametrize("provider,client_name", [("openai", "OpenAIReasoningClient"), ("qwen", "Qwen3VLReasoningClient")])
+@pytest.mark.parametrize("payload", ['{"category1":"dress","fit":"oversize","fabric":"linen"}', 'not json'])
+def test_other_providers_use_intent_prompt_and_shared_validation(monkeypatch, provider, client_name, payload):
+    from pipeline.intent import intent_extraction as intent
+    intent._get_provider_module.cache_clear()
+    generate = Mock(return_value=payload)
+    monkeypatch.setattr(generation, client_name, lambda **kwargs: SimpleNamespace(
+        model_name="test-model", generate_with_prompt=generate))
+    result = intent.extract_conservative_metadata("린넨 원피스", provider=provider,
+        image_bytes=b"image", image_mime_type="image/png")
+    args = generate.call_args.kwargs
+    assert args["image_bytes"] == b"image"
+    assert args["image_mime_type"] == "image/png"
+    assert "ONLY the attributes the user explicitly stated" in args["prompt"]
+    assert result.requested_provider == provider
+    if payload == 'not json':
+        assert result.status == "degraded"
+        assert result.provider == "rule_based"
+    else:
+        assert result.status == "ok"
+        assert result.provider == provider
+        assert result.attributes.category1 == "one-piece"
+        assert result.attributes.fit == "oversized"
+        assert result.attributes.fabric == "linen"
+
+
+@pytest.mark.parametrize("role", ["intent_provider", "target_description_provider"])
+def test_invalid_role_provider_fails_before_model_calls(monkeypatch, role):
+    extraction = Mock()
+    monkeypatch.setattr(service, "extract_conservative_metadata", extraction)
+    with pytest.raises(ValueError, match="provider"):
+        pipeline_without_io().search("상의", **{role: "unknown"})
+    extraction.assert_not_called()

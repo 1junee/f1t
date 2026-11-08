@@ -126,8 +126,7 @@ def test_search_hides_runtime_error_details(monkeypatch) -> None:
             category2=None,
             category2_keyword=None,
             provider=None,
-            pipeline_method=api.DEFAULT_PIPELINE_METHOD,
-        )
+            )
 
     assert exc_info.value.status_code == 502
     assert exc_info.value.detail == "Search service is temporarily unavailable."
@@ -163,3 +162,41 @@ def test_analyze_hides_internal_error(monkeypatch) -> None:
 
     assert exc_info.value.status_code == 500
     assert exc_info.value.detail == "Internal server error."
+
+@pytest.mark.parametrize("legacy_method", [None, "intent", "metadata", "attribute_text"])
+def test_search_http_accepts_current_and_legacy_forms(monkeypatch, legacy_method):
+    from fastapi.testclient import TestClient
+
+    captured = {}
+
+    class SearchService:
+        def search(self, **kwargs):
+            captured.update(kwargs)
+            return "black shirt", "검은 셔츠", {"provider": "gemini"}, []
+
+    monkeypatch.setattr(api.app.state, "search_service", SearchService(), raising=False)
+    data = {"query": "검은 셔츠", "provider": "gemini"}
+    if legacy_method is not None:
+        data["pipeline_method"] = legacy_method
+    client = TestClient(api.app)
+    try:
+        response = client.post("/search", data=data)
+    finally:
+        client.close()
+    assert response.status_code == 200
+    assert captured["query"] == "검은 셔츠"
+    assert "pipeline_method" not in captured
+
+@pytest.mark.parametrize("field", ["intent_provider", "target_description_provider"])
+def test_search_rejects_unknown_role_provider_before_service(monkeypatch, field):
+    from fastapi.testclient import TestClient
+    from unittest.mock import Mock
+    search = Mock()
+    monkeypatch.setattr(api.app.state, "search_service", SimpleNamespace(search=search), raising=False)
+    client = TestClient(api.app)
+    try:
+        response = client.post("/search", data={"query": "셔츠", field: "invalid"})
+    finally:
+        client.close()
+    assert response.status_code == 400
+    search.assert_not_called()

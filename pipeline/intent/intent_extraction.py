@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import os
 import re
+from functools import lru_cache
+from threading import Lock
 from dataclasses import dataclass
 from typing import Any
 
@@ -107,6 +109,8 @@ class ConservativeMetadataExtraction:
     raw_output: str
     error: str | None = None
     model_name: str | None = None
+    requested_provider: str = "gemini"
+    provider: str = "gemini"
 
     def to_metadata(self) -> dict[str, Any]:
         # API 설명용 요약에는 원문 응답 전체 대신 사용한 필드·모델·오류 정보를 담는다.
@@ -117,6 +121,8 @@ class ConservativeMetadataExtraction:
             "fields": sorted(self.attributes.to_dict()),
             "error": self.error,
             "model": self.model_name,
+            "requested_provider": self.requested_provider,
+            "provider": self.provider,
         }
 
 
@@ -218,6 +224,47 @@ def _get_module(model_name: str | None = None) -> IntentExtractionModule:
     return _module_cache[resolved_model]
 
 
+class ProviderIntentExtractionModule:
+    """기존 제공자 클라이언트에 동일한 보수적 속성 추출 프롬프트를 전달한다."""
+
+    def __init__(self, provider: str, model_name: str | None = None):
+        from ..target_description.target_description_generation import (
+            OpenAIReasoningClient, Qwen3VLReasoningClient,
+        )
+        client_type = OpenAIReasoningClient if provider == "openai" else Qwen3VLReasoningClient
+        self.client = client_type(model_name=model_name)
+        self.model_name = self.client.model_name
+        self._inference_lock = Lock()
+
+    def infer(self, query, image_bytes=None, image_mime_type=None, image_url=None):
+        if not image_bytes and image_url:
+            response = requests.get(image_url, timeout=10)
+            response.raise_for_status()
+            image_bytes = response.content
+            image_mime_type = response.headers.get("content-type") or "image/jpeg"
+        image_instruction = (
+            "Reference image provided: use it ONLY for attributes explicitly requested by the user. "
+            "Do NOT add attributes merely because they are visible."
+            if image_bytes else "No image provided: extract attributes from the text query only."
+        )
+        # 캐시한 로컬 모델을 여러 요청이 동시에 초기화·실행하지 않도록 보호한다.
+        with self._inference_lock:
+            output = self.client.generate_with_prompt(
+                prompt=INFERENCE_PROMPT_TEMPLATE.format(user_query=query, image_instruction=image_instruction),
+                image_bytes=image_bytes,
+                image_mime_type=image_mime_type,
+            )
+        parsed = _parse_json(output)
+        if parsed is None:
+            raise RuntimeError("Metadata response JSON parse failed.")
+        return parsed
+
+
+@lru_cache(maxsize=8)
+def _get_provider_module(provider: str, model_name: str) -> ProviderIntentExtractionModule:
+    return ProviderIntentExtractionModule(provider, model_name)
+
+
 def extract_conservative_metadata(
     query: str,
     image_bytes: bytes | None = None,
@@ -226,14 +273,26 @@ def extract_conservative_metadata(
     # kept for call-site compat, ignored
     client: Any = None,
     model_name: str | None = None,
+    provider: str = "gemini",
 ) -> ConservativeMetadataExtraction:
     # 외부에서 호출하는 진입점: 요청 문장·선택적 이미지를 받아 정규화된 속성을 반환한다.
-    resolved_model = resolve_intent_model(model_name)
+    provider = provider.strip().lower()
+    if provider not in {"gemini", "openai", "qwen"}:
+        raise ValueError("provider must be gemini, openai, or qwen.")
+    from ..target_description.target_description_generation import OPENAI_MODEL_NAME, QWEN_FALLBACK_MODEL_NAME
+    if provider == "gemini":
+        resolved_model = resolve_intent_model(model_name)
+    elif provider == "openai":
+        resolved_model = model_name or os.getenv("OPENAI_MODEL") or OPENAI_MODEL_NAME
+    else:
+        resolved_model = (model_name or os.getenv("QWEN_FALLBACK_MODEL")
+                          or os.getenv("QWEN3_VL_MODEL") or QWEN_FALLBACK_MODEL_NAME)
     try:
-        try:
+        if provider == "gemini":
             module = _get_module(resolved_model)
-        except TypeError:  # Backward-compatible with old test monkeypatches.
-            module = _get_module()
+        else:
+            module = _get_provider_module(provider, resolved_model)
+            resolved_model = module.model_name
         raw = module.infer(
             query=query,
             image_bytes=image_bytes,
@@ -246,10 +305,12 @@ def extract_conservative_metadata(
         return ConservativeMetadataExtraction(
             attributes=attrs,
             status="ok",
-            method="gemini_intent_analysis",
+            method=f"{provider}_intent_analysis",
             prompt_id="intent_analysis_v1",
             raw_output=raw_str,
             model_name=resolved_model,
+            requested_provider=provider,
+            provider=provider,
         )
     except Exception as exc:
         # 모델 호출·파싱이 실패하면 텍스트 규칙 파서의 결과와 degraded 상태를 반환한다.
@@ -261,6 +322,8 @@ def extract_conservative_metadata(
             raw_output="",
             error=str(exc),
             model_name=resolved_model,
+            requested_provider=provider,
+            provider="rule_based",
         )
 
 

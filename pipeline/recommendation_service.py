@@ -42,7 +42,6 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_TOP_K = 3
 DEFAULT_RECOMMENDATION_COUNT = 10
-DEFAULT_PIPELINE_METHOD = "intent"
 MAX_TOP_K = 100
 VALID_PROVIDERS = {"gemini", "openai", "qwen"}
 VALID_TABLES = {
@@ -155,16 +154,19 @@ class FashionRecommendationPipeline:
         category2_filter: str | None = None,
         category2_keyword_filter: str | None = None,
         provider: str | None = None,
-        pipeline_method: str = DEFAULT_PIPELINE_METHOD,
+        intent_provider: str | None = None,
+        target_description_provider: str | None = None,
     ) -> tuple[str, str, dict[str, Any], list[dict[str, Any]]]:
-        timings = SearchTimings()
-        requested_pipeline = pipeline_method.lower().strip() or DEFAULT_PIPELINE_METHOD
-        if requested_pipeline not in {"attribute_text", "metadata", "intent"}:
-            raise ValueError("pipeline_method must be intent.")
 
-        # 이 제공자 선택은 목표 설명 생성에 쓰인다. 속성 추출과 임베딩 선택은 별도다.
-        effective_provider = (provider or self._default_provider).lower().strip()
-        if effective_provider not in VALID_PROVIDERS:
+        timings = SearchTimings()
+
+        # 공통 제공자를 기본으로 쓰고 역할별 지정이 있으면 우선한다. 임베딩은 별도 설정이다.
+        selected_provider = (provider or self._default_provider).lower().strip()
+        selected_intent_provider = (intent_provider or selected_provider).lower().strip()
+        selected_description_provider = (target_description_provider or selected_provider).lower().strip()
+        if any(value not in VALID_PROVIDERS for value in (
+            selected_provider, selected_intent_provider, selected_description_provider
+        )):
             raise ValueError("provider must be gemini, openai, or qwen.")
         raw_fallback = query.strip() or DEFAULT_IMAGE_ONLY_QUERY
 
@@ -179,16 +181,17 @@ class FashionRecommendationPipeline:
                 query=query,
                 image_bytes=image_bytes,
                 image_mime_type=image_mime_type,
+                provider=selected_intent_provider,
             )
             reasoning_future = executor.submit(
                 timings.run,
                 "target_description", "목표 상품 설명 생성", "analysis",
                 self._run_target_description_reasoning,
                 query=query,
-                raw_fallback=raw_fallback,
                 image_bytes=image_bytes,
                 image_mime_type=image_mime_type,
-                provider=effective_provider,
+                provider=selected_description_provider,
+                raw_fallback=raw_fallback,
             )
             # 두 submit이 끝난 뒤 결과를 기다린다. result()의 순서가 실행을 순차화하지는 않는다.
             intent_extraction = intent_future.result()
@@ -207,7 +210,7 @@ class FashionRecommendationPipeline:
                     if intent_extraction and intent_extraction.status == "ok"
                     else None
                 ),
-                extraction_metadata=(
+                extraction_info=(
                     intent_extraction.to_metadata() if intent_extraction else None
                 ),
                 table_filter=table_filter,
@@ -216,6 +219,14 @@ class FashionRecommendationPipeline:
             )
 
         pipeline_metadata = attribute_plan.to_dict()
+        pipeline_metadata["providers"] = {
+            "intent": intent_extraction.to_metadata() if intent_extraction else None,
+            "target_description": {
+                "requested_provider": selected_description_provider,
+                "provider": reasoning_provider,
+                "status": reasoning_status,
+            },
+        }
         pipeline_metadata["parallel_execution"] = {
             "intent_and_target_description": True,
             "translation_and_embedding": True,
@@ -224,9 +235,9 @@ class FashionRecommendationPipeline:
         # 참고 이미지를 그대로 검색 벡터로 만들지 않고, 생성된 설명문을 검색 입력으로 사용한다.
         target_description = reasoning_result["Target Image Description"]
         retrieval_description = target_description
-        pipeline_metadata["target_description_lanes"] = {
+        pipeline_metadata["descriptions"] = {
             "target_description_reasoning": target_description,
-            "detail_target_description": attribute_plan.detail_target_description,
+            "detail_hint": attribute_plan.detail_hint,
         }
         pipeline_metadata["target_description_reasoning"] = reasoning_result
         pipeline_metadata["target_description_request"] = query
@@ -347,7 +358,7 @@ class FashionRecommendationPipeline:
                 query=query,
                 parsed_attributes=pipeline_metadata.get("parsed_attributes"),
                 target_description_ko=target_description_ko,
-                detail_target_description=pipeline_metadata.get("detail_target_description"),
+                detail_hint=pipeline_metadata.get("detail_hint"),
                 target_description_reasoning=reasoning_result,
                 has_reference_image=bool(image_bytes),
             )
@@ -566,7 +577,6 @@ def _parse_stored_vector(value: Any) -> list[float]:
 
 
 __all__ = [
-    "DEFAULT_PIPELINE_METHOD",
     "DEFAULT_RECOMMENDATION_COUNT",
     "DEFAULT_TOP_K",
     "FashionRecommendationPipeline",
