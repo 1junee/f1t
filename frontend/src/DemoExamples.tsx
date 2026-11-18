@@ -3,13 +3,13 @@ import { useEffect, useState } from 'react'
 const examples = [
   {
     id: 'side-stripe',
-    title: '옆선 더하기',
+    title: '01 · 옆선 더하기',
     query: '이 사진의 트레이닝 팬츠와 비슷한데, 옆에 라인이 있는 바지 찾아줘.',
     alt: '베이지 트레이닝 팬츠를 입은 사람',
   },
   {
     id: 'long-pants',
-    title: '긴 바지로 바꾸기',
+    title: '02 · 긴 바지로 바꾸기',
     query: '이 사진의 바지와 비슷한데, 발목까지 오는 긴 바지 찾아줘.',
     alt: '카고 반바지를 입은 사람',
   },

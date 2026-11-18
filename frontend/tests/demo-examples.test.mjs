@@ -30,7 +30,7 @@ function harness(fetch) {
   }
 }
 
-test('03 → 01 순서로 원본 사진과 요청을 함께 입력하며 선택 자체로 검색하지 않는다', async () => {
+test('옆선 → 기장 변경 순서로 원본 사진과 요청을 함께 입력하며 선택 자체로 검색하지 않는다', async () => {
   const requests = []
   const demo = harness(async (url) => {
     requests.push(url)
