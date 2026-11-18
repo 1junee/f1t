@@ -4,5 +4,5 @@ https://www.pexels.com/photo/calm-black-man-in-comfy-sportswear-standing-in-ligh
 short-sleeve-shirt.jpg — Michael Burrows
 https://www.pexels.com/photo/man-wearing-stripes-long-sleeves-7129355/
 
-long-dress.jpg — Chu Chup Hinh
-https://www.pexels.com/photo/woman-standing-and-wearing-white-floral-short-sleeved-dress-1329656/
+long-dress.jpg — Jonathan Borba
+https://www.pexels.com/photo/charming-carefree-woman-walking-on-dry-field-4238978/
