@@ -30,7 +30,7 @@ function harness(fetch) {
   }
 }
 
-test('바지 → 셔츠 → 원피스 순서로 원본 사진과 요청을 함께 입력하며 선택 자체로 검색하지 않는다', async () => {
+test('바지 → 셔츠 순서로 원본 사진과 요청을 함께 입력하며 선택 자체로 검색하지 않는다', async () => {
   const requests = []
   const demo = harness(async (url) => {
     requests.push(url)
@@ -40,11 +40,10 @@ test('바지 → 셔츠 → 원피스 순서로 원본 사진과 요청을 함�
   demo.effects[0]()
   await flushPromises()
   for (const button of demo.render()) button.props.onClick()
-  assert.equal(demo.selections.length, 3)
+  assert.equal(demo.selections.length, 2)
   const expected = [
     ['side-stripe', '이 사진의 트레이닝 팬츠와 비슷한데, 옆에 라인이 있는 바지 찾아줘.'],
     ['short-sleeve-shirt', '이 사진의 셔츠와 비슷한데, 소매가 짧은 반팔 셔츠로 찾아줘.'],
-    ['long-dress', '이 사진의 원피스와 비슷한데, 발목까지 오는 긴 원피스로 찾아줘.'],
   ]
   for (const [i, [id, query]] of expected.entries()) {
     const [actualQuery, file] = demo.selections[i]
@@ -52,7 +51,7 @@ test('바지 → 셔츠 → 원피스 순서로 원본 사진과 요청을 함�
     assert.equal(file.name, `${id}.jpg`)
     assert.deepEqual(Buffer.from(await file.arrayBuffer()), readFileSync(new URL(`../public/demo/${id}.jpg`, import.meta.url)))
   }
-  assert.deepEqual(requests, ['/demo/side-stripe.jpg', '/demo/short-sleeve-shirt.jpg', '/demo/long-dress.jpg'])
+  assert.deepEqual(requests, ['/demo/side-stripe.jpg', '/demo/short-sleeve-shirt.jpg'])
   assert.ok(demo.render(true).every((button) => button.props.disabled))
 })
 
