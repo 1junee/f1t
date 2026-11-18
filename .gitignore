@@ -38,3 +38,6 @@ pipeline/pipeline_output.json
 # Local documentation and experiments
 /docs/
 /experiments/
+
+# Public demo input photos
+!frontend/public/demo/*.jpg

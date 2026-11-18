@@ -1234,3 +1234,21 @@ button:disabled {
 @media (max-width: 760px) {
   .f1t-timing-stages { grid-template-columns: 1fr; }
 }
+
+.f1t-demo-examples { margin-top: 20px; }
+.f1t-demo-examples > p { margin: 0 0 10px; font-size: 12px; font-weight: 600; }
+.f1t-demo-examples > p > span { margin-left: 8px; color: #77736c; font-weight: 400; }
+.f1t-demo-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.f1t-demo-card { display: flex; align-items: center; gap: 12px; padding: 12px; text-align: left; border: 1px solid #dedbd5; background: #fff; cursor: pointer; min-width: 0; }
+.f1t-demo-card:hover:not(:disabled) { border-color: #55514b; background: #faf9f6; }
+.f1t-demo-card:focus-visible { outline: 2px solid #55514b; outline-offset: 3px; }
+.f1t-demo-card:disabled { opacity: .55; cursor: wait; }
+.f1t-demo-card > img { width: 64px; height: 96px; flex-shrink: 0; object-fit: contain; background: #f3f1ed; }
+.f1t-demo-copy { display: grid; gap: 6px; line-height: 1.55; }
+.f1t-demo-copy > strong { font-size: 13px; }
+.f1t-demo-copy > span { font-size: 12px; color: #696762; word-break: keep-all; }
+.f1t-demo-copy > small { font-size: 11px; color: #55514b; }
+@media (max-width: 760px) {
+  .f1t-demo-grid { grid-template-columns: 1fr; }
+  .f1t-demo-examples > p > span { display: block; margin: 5px 0 0; }
+}

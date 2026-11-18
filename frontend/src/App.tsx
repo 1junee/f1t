@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { SyntheticEvent } from 'react'
+import { DemoExamples } from './DemoExamples'
 
 import {
   fetchCategoryRows,
@@ -1321,6 +1322,14 @@ function App() {
                 <button type="submit" className="f1t-search-button" disabled={isUnderstandingRequest || isSearchCompleteVisible}>{isUnderstandingRequest ? '찾고 있어요' : isSearchCompleteVisible ? '검색 완료' : '스타일 찾기'}<span aria-hidden="true">↗</span></button>
               </div>
             </form>
+
+            <DemoExamples disabled={isUnderstandingRequest || isSearchCompleteVisible} onSelect={(queryText, file) => {
+              setQuery(queryText)
+              setImageFile(file)
+              setActiveCategoryId('all')
+              setErrorMessage('')
+              if (imageInputRef.current) imageInputRef.current.value = ''
+            }} />
 
             <div className="f1t-search-options">
               <span>이렇게 찾아보세요</span>

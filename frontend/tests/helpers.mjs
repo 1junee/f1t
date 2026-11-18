@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import vm from 'node:vm'
@@ -29,7 +29,7 @@ export function loadModule(entry, { globals = {}, modules = {} } = {}) {
         if (specifier in modules) return modules[specifier]
         if (!specifier.startsWith('.')) throw new Error(`Unexpected test import: ${specifier}`)
         const path = resolve(dirname(filename), specifier)
-        return load(/\.[cm]?[jt]sx?$/.test(path) ? path : `${path}.ts`)
+        return load(/\.[cm]?[jt]sx?$/.test(path) ? path : existsSync(`${path}.ts`) ? `${path}.ts` : `${path}.tsx`)
       },
     }, { filename })
     return module.exports
